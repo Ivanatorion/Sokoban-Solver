@@ -75,10 +75,11 @@ class Sokoban{
     Sokoban(FILE* inputMap);
     ~Sokoban();
 
-    SOKOBAN_SOLUTION solve(bool verbose, bool greedy, ALGO algo);
+    SOKOBAN_SOLUTION solve(bool verbose, bool lowMemory, bool greedy, ALGO algo);
   private:
     int mapLenX, mapLenY;
     int mapBoxQuant;
+    bool lowMemory;
 
     char *gameMap;
 
@@ -110,6 +111,9 @@ class Sokoban{
     bool *tickedRows;
     bool *tickedCols;
 
+    int *distBoxesPP;
+    int *distBoxesNPP;
+
     std::vector<std::pair<ACTION, SOKOBAN_STATE>> getSucc(SOKOBAN_STATE &state);
     bool isGoalState(SOKOBAN_STATE &state);
     SOKOBAN_NODE* makeRootNode();
@@ -124,6 +128,8 @@ class Sokoban{
     ACTION opposite(ACTION action);
     int getTileDistance(POSITION a, POSITION b);
     int getBoxTileDistance(POSITION box, POSITION goal);
+    bool checkMoveCloser(SOKOBAN_STATE &state, ACTION action);
+    void calcTileDistanceBoxes(SOKOBAN_STATE &state, POSITION p1, int *distances);
     void calculateTileDistances();
     void calculateBoxTileDistances();
 };

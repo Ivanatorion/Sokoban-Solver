@@ -3,7 +3,6 @@
 #include <climits>
 #include <chrono>
 #include <sys/types.h>
-#include <sys/sysinfo.h>
 
 Sokoban::Sokoban(FILE* inputMap){
   std::vector<std::vector<char>> tempGameMap;
@@ -61,6 +60,10 @@ Sokoban::Sokoban(FILE* inputMap){
   this->numberZeroesCol = new int[this->mapBoxQuant];
   this->tickedRows = new bool[this->mapBoxQuant];
   this->tickedCols = new bool[this->mapBoxQuant];
+
+
+  this->distBoxesPP = new int[this->mapLenX * this->mapLenY];
+  this->distBoxesNPP = new int[this->mapLenX * this->mapLenY];
 
   std::queue<std::pair<POSITION, int>> q;
   std::unordered_set<POSITION> closed;
@@ -208,6 +211,10 @@ Sokoban::~Sokoban(){
   delete[] this->numberZeroesCol;
   delete[] this->tickedRows;
   delete[] this->tickedCols;
+
+
+  delete[] this->distBoxesPP;
+  delete[] this->distBoxesNPP;
 }
 
 struct ComparePriorityAstar {
@@ -548,10 +555,12 @@ SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*
   return sol;
 }
 
-SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool greedy, ALGO algo){
+SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, bool greedy, ALGO algo){
   auto tempoInicial = std::chrono::steady_clock::now();
 
   SOKOBAN_SOLUTION solution;
+
+  this->lowMemory = lowMemory;
 
   switch (algo) {
     case ASTAR:
@@ -704,10 +713,7 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
   if(initialNode->heuristica < SHRT_MAX)
     open.push(initialNode);
 
-  struct sysinfo memInfo;
-  sysinfo(&memInfo);
-
-  while(!open.empty() && memInfo.freeram > RAM_LIMIT){
+  while(!open.empty()){
     SOKOBAN_NODE* n = open.top();
     open.pop();
 
@@ -742,14 +748,19 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
       for(std::pair<ACTION, SOKOBAN_STATE> s : getSucc(*(n->state))){
 
         if(closed.find(s.second) == closed.end()){
-          SOKOBAN_NODE* nl = makeNode(n, s.first, s.second);
-          if(nl->heuristica < SHRT_MAX){
-            nodes.push_back(nl);
-            open.push(nl);
+          if(this->lowMemory && !movedBox(s.second, s.first) && !checkMoveCloser(*(n->state), s.first)){
+            closed.insert(s.second);
           }
           else{
-            delete nl->state;
-            delete nl;
+            SOKOBAN_NODE* nl = makeNode(n, s.first, s.second);
+            if(nl->heuristica < SHRT_MAX){
+              nodes.push_back(nl);
+              open.push(nl);
+            }
+            else{
+              delete nl->state;
+              delete nl;
+            }
           }
         }
       }
@@ -758,7 +769,6 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
       n->state = nullptr;
     }
 
-    //sysinfo(&memInfo);
   }
 
   for(SOKOBAN_NODE* n : nodes){
@@ -803,10 +813,7 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
   if(initialNode->heuristica < SHRT_MAX)
     open.push(initialNode);
 
-  struct sysinfo memInfo;
-  sysinfo(&memInfo);
-
-  while(!open.empty() && memInfo.freeram > RAM_LIMIT){
+  while(!open.empty()){
     SOKOBAN_NODE* n = open.top();
     open.pop();
 
@@ -855,8 +862,6 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
       delete n->state;
       n->state = nullptr;
     }
-
-    //sysinfo(&memInfo);
   }
 
   for(SOKOBAN_NODE* n : nodes){
@@ -1178,6 +1183,110 @@ int Sokoban::getTileDistance(POSITION a, POSITION b){
 
 int Sokoban::getBoxTileDistance(POSITION box, POSITION goal){
   return this->boxTileDistances[box * this->mapLenX * this->mapLenY + goal];
+}
+
+bool Sokoban::checkMoveCloser(SOKOBAN_STATE &state, ACTION action){
+  int pp = state.playerPosition;
+  int newPP = pp;
+  switch(action){
+    case UP:
+      newPP = pp - this->mapLenX;
+      break;
+    case DOWN:
+      newPP = pp + this->mapLenX;
+      break;
+    case LEFT:
+      newPP = pp - 1;
+      break;
+    case RIGHT:
+      newPP = pp + 1;
+      break;
+  }
+
+  POSITION neighboor;
+
+  calcTileDistanceBoxes(state, pp, distBoxesPP);
+  calcTileDistanceBoxes(state, newPP, distBoxesNPP);
+
+  for(POSITION bp : state.boxPositions){
+    if(bp % this->mapLenX != 0){
+      neighboor = bp - 1;
+      if(distBoxesNPP[neighboor] < distBoxesPP[neighboor])
+        return true;
+    }
+    if((bp + 1) % this->mapLenX != 0){
+      neighboor = bp + 1;
+      if(distBoxesNPP[neighboor] < distBoxesPP[neighboor])
+        return true;
+    }
+    if(bp - this->mapLenX >= 0){
+      neighboor = bp - this->mapLenX;
+      if(distBoxesNPP[neighboor] < distBoxesPP[neighboor])
+        return true;
+    }
+    if(bp + this->mapLenX < this->mapLenX * this->mapLenY){
+      neighboor = bp + this->mapLenX;
+      if(distBoxesNPP[neighboor] < distBoxesPP[neighboor])
+        return true;
+    }
+  }
+
+  return false;
+}
+
+void Sokoban::calcTileDistanceBoxes(SOKOBAN_STATE &state, POSITION p1, int *distances){
+  const int tiles = this->mapLenX * this->mapLenY;
+  std::queue<std::pair<POSITION, int>> q;
+  std::unordered_set<POSITION> closed;
+  std::pair<POSITION, int> auxP;
+
+  auxP.first = p1;
+  auxP.second = 0;
+  q.push(auxP);
+
+  for(int i = 0; i < tiles; i++)
+    distances[i] = SHRT_MAX;
+
+  while(!q.empty()){
+    std::pair<POSITION, int> p = q.front();
+    q.pop();
+
+    if(closed.find(p.first) == closed.end()){
+      closed.insert(p.first);
+      distances[p.first] = p.second;
+
+      POSITION neighboor = p.first;
+      auxP.second = p.second + 1;
+
+      neighboor = neighboor - this->mapLenX;
+      if(neighboor >= 0 && gameMap[neighboor] != WALL && state.boxPositions.find(neighboor) == state.boxPositions.end()){
+        auxP.first = neighboor;
+        q.push(auxP);
+      }
+      neighboor = neighboor + 2*this->mapLenX;
+      if(neighboor < this->mapLenX*this->mapLenY && gameMap[neighboor] != WALL && state.boxPositions.find(neighboor) == state.boxPositions.end()){
+        auxP.first = neighboor;
+        q.push(auxP);
+      }
+      neighboor = neighboor - this->mapLenX;
+
+      if(neighboor % this->mapLenX != 0){
+        neighboor--;
+        if(gameMap[neighboor] != WALL && state.boxPositions.find(neighboor) == state.boxPositions.end()){
+          auxP.first = neighboor;
+          q.push(auxP);
+        }
+        neighboor++;
+      }
+      if((neighboor+1) % this->mapLenX != 0){
+        neighboor++;
+        if(gameMap[neighboor] != WALL && state.boxPositions.find(neighboor) == state.boxPositions.end()){
+          auxP.first = neighboor;
+          q.push(auxP);
+        }
+      }
+    }
+  }
 }
 
 void Sokoban::calculateTileDistances(){

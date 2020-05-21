@@ -1,6 +1,6 @@
 all: sokoban
 
-sokoban: bin/ bin/main.o bin/Sokoban.o
+sokoban: bin/main.o bin/Sokoban.o
 	g++ -std=c++11 -O3 -o sokoban bin/main.o bin/Sokoban.o -lm
 
 bin/Sokoban.o: include/Sokoban.h src/Sokoban.cpp

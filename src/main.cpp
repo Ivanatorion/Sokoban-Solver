@@ -3,7 +3,7 @@
 
 #include "../include/Sokoban.h"
 
-void parseArgs(int argc, char* argv[], bool *showHelp, bool *verbose, ALGO *algo){
+void parseArgs(int argc, char* argv[], bool *showHelp, bool *verbose, ALGO *algo, bool *lowMemory){
   int i = 0;
 
   while(i < argc){
@@ -11,6 +11,8 @@ void parseArgs(int argc, char* argv[], bool *showHelp, bool *verbose, ALGO *algo
       *showHelp = true;
     if(!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose"))
       *verbose = true;
+    if(!strcmp(argv[i], "-lm") || !strcmp(argv[i], "--lowMemory"))
+      *lowMemory = true;
     if(!strcmp(argv[i], "-a") || !strcmp(argv[i], "--algorithm")){
       i++;
       if(i < argc){
@@ -29,9 +31,10 @@ void parseArgs(int argc, char* argv[], bool *showHelp, bool *verbose, ALGO *algo
 void showHelpMessage(){
   printf("Sokoban Solver\n\nUsage: ./sokoban [Args] < level.txt\n");
   printf("\nArgs:\n");
-  printf("(-h | --help)             : Display help message\n");
-  printf("(-v | --verbose )         : Prints search status during execution\n");
-  printf("(-a | --algorithm ) [Alg] : Specfies the algorithm to use in the search\n");
+  printf("(-h  | --help )            : Display help message\n");
+  printf("(-v  | --verbose )         : Prints search status during execution\n");
+  printf("(-lm | --lowMemory )       : Use less memory during search (at expense of search speed)\n");
+  printf("(-a  | --algorithm ) [Alg] : Specfies the algorithm to use in the search\n");
   printf("\nAlg: astar | idastar | greedy\n");
 }
 
@@ -39,8 +42,9 @@ int main(int argc, char* argv[]){
   bool verbose = false;
   bool showHelp = false;
   bool greedy = false;
+  bool lowMemory = false;
   ALGO algo = ASTAR;
-  parseArgs(argc, argv, &showHelp, &verbose, &algo);
+  parseArgs(argc, argv, &showHelp, &verbose, &algo, &lowMemory);
 
   if(showHelp){
     showHelpMessage();
@@ -49,7 +53,7 @@ int main(int argc, char* argv[]){
 
   Sokoban sokoban(stdin);
 
-  SOKOBAN_SOLUTION sl = sokoban.solve(verbose, greedy, algo);
+  SOKOBAN_SOLUTION sl = sokoban.solve(verbose, lowMemory, greedy, algo);
 
   printf("Initial Heuristic: %d\n", sl.heuristicaInicial);
 
