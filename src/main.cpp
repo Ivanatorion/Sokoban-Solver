@@ -22,6 +22,8 @@ void parseArgs(int argc, char* argv[], bool *showHelp, bool *verbose, ALGO *algo
           *algo = IDASTAR;
         if(!strcmp(argv[i], "greedy"))
           *algo = GREEDY;
+        if(!strcmp(argv[i], "peastar"))
+          *algo = PEASTAR;
       }
     }
     i++;
@@ -35,7 +37,7 @@ void showHelpMessage(){
   printf("(-v  | --verbose )         : Prints search status during execution\n");
   printf("(-lm | --lowMemory )       : Use less memory during search (at expense of search speed)\n");
   printf("(-a  | --algorithm ) [Alg] : Specfies the algorithm to use in the search\n");
-  printf("\nAlg: astar | idastar | greedy\n");
+  printf("\nAlg: astar | idastar | greedy | peastar\n");
 }
 
 int main(int argc, char* argv[]){
@@ -53,7 +55,7 @@ int main(int argc, char* argv[]){
 
   Sokoban sokoban(stdin);
 
-  SOKOBAN_SOLUTION sl = sokoban.solve(verbose, lowMemory, greedy, algo);
+  SOKOBAN_SOLUTION sl = sokoban.solve(verbose, lowMemory, greedy, algo, 0);
 
   printf("Initial Heuristic: %d\n", sl.heuristicaInicial);
 
@@ -87,7 +89,7 @@ int main(int argc, char* argv[]){
         break;
     }
   }
-  printf("Expanded: %lld States\nTime(ms): %lld\n", sl.expanded, sl.timeMilis);
+  printf("Maximum Open size: %lld\nAdded %lld States to Open\nExpanded: %lld States\nTime(ms): %lld\n", sl.maximumOpenSize, sl.addedToOpen, sl.expanded, sl.timeMilis);
 
   return 0;
 }

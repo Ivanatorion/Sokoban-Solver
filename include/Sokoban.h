@@ -13,7 +13,7 @@
 enum ACTION {UP, DOWN, LEFT, RIGHT};
 enum GAME_TILE {EMPTY = ' ', WALL = '#', BOX = '$', GOAL = '.', PLAYER = '@', GOAL_AND_BOX = '*', PLAYER_AND_GOAL = '+'};
 
-enum ALGO {ASTAR, GREEDY, IDASTAR};
+enum ALGO {ASTAR, GREEDY, IDASTAR, PEASTAR};
 
 struct SOKOBAN_SOLUTION{
   int cost;
@@ -21,6 +21,8 @@ struct SOKOBAN_SOLUTION{
 
   long long int timeMilis;
   long long int expanded;
+  long long int addedToOpen;
+  long long int maximumOpenSize;
 
   int heuristicaInicial;
 };
@@ -68,6 +70,7 @@ typedef struct soknode{
   SOKOBAN_STATE *state;
   soknode *parent;
   ACTION action;
+  short int additionalF;
 } SOKOBAN_NODE;
 
 class Sokoban{
@@ -75,7 +78,7 @@ class Sokoban{
     Sokoban(FILE* inputMap);
     ~Sokoban();
 
-    SOKOBAN_SOLUTION solve(bool verbose, bool lowMemory, bool greedy, ALGO algo);
+    SOKOBAN_SOLUTION solve(bool verbose, bool lowMemory, bool greedy, ALGO algo, int idastarFlimit);
   private:
     int mapLenX, mapLenY;
     int mapBoxQuant;
@@ -94,10 +97,11 @@ class Sokoban{
     int *boxTileDistances; //Distances beween tiles (boxes)
 
     SOKOBAN_SOLUTION solveAstar(bool verbose);
+    SOKOBAN_SOLUTION solvePEAstar(bool verbose);
     SOKOBAN_SOLUTION solveGBFS(bool verbose);
 
     std::pair<int, std::vector<ACTION>> recursiveSearchIdastar(SOKOBAN_NODE* node, int fLimit, int *expanded, bool *noneSol, std::unordered_set<SOKOBAN_STATE> &transpositionTable);
-    SOKOBAN_SOLUTION solveIdAstar(bool verbose);
+    SOKOBAN_SOLUTION solveIdAstar(bool verbose, int idastarFlimit);
 
     int fHeuristica(SOKOBAN_STATE &state);
     bool forceAssing(int col);
@@ -119,7 +123,7 @@ class Sokoban{
     SOKOBAN_NODE* makeRootNode();
     SOKOBAN_NODE* makeNode(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE &state);
     SOKOBAN_NODE* makeNodePreSearch(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE &state, POSITION goal, int gValue);
-    SOKOBAN_SOLUTION extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded);
+    SOKOBAN_SOLUTION extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen, long long int maximumOpenSize);
 
     //Aux Functions
     bool checkFrozen(SOKOBAN_STATE &state, POSITION boxPosition);

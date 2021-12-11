@@ -220,10 +220,10 @@ Sokoban::~Sokoban(){
 struct ComparePriorityAstar {
     bool operator()(SOKOBAN_NODE* const& n1, SOKOBAN_NODE* const& n2)
     {
-        if(n1->pathCost + n1->heuristica == n2->pathCost + n2->heuristica)
+        if(n1->pathCost + n1->heuristica + n1->additionalF == n2->pathCost + n2->heuristica + n2->additionalF)
           return n1->heuristica > n2->heuristica;
         else
-          return n1->pathCost + n1->heuristica > n2->pathCost + n2->heuristica;
+          return n1->pathCost + n1->heuristica + n1->additionalF > n2->pathCost + n2->heuristica + n2->additionalF;
     }
 };
 
@@ -524,10 +524,12 @@ bool Sokoban::forceAssing(int col){
   return false;
 }
 
-SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded){
+SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen, long long int maximumOpenSize){
   SOKOBAN_SOLUTION sol;
   sol.cost = n->pathCost;
   sol.expanded = expanded;
+  sol.addedToOpen = addedToOpen;
+  sol.maximumOpenSize = maximumOpenSize;
 
   while(n->parent != NULL){
     sol.path.push_back(n->action);
@@ -555,7 +557,7 @@ SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*
   return sol;
 }
 
-SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, bool greedy, ALGO algo){
+SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, bool greedy, ALGO algo, int idastarFlimit){
   auto tempoInicial = std::chrono::steady_clock::now();
 
   SOKOBAN_SOLUTION solution;
@@ -566,8 +568,11 @@ SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, bool greedy, ALGO 
     case ASTAR:
       solution = solveAstar(verbose);
       break;
+    case PEASTAR:
+      solution = solvePEAstar(verbose);
+      break;
     case IDASTAR:
-      solution = solveIdAstar(verbose);
+      solution = solveIdAstar(verbose, idastarFlimit);
       break;
     case GREEDY:
       solution = solveGBFS(verbose);
@@ -630,12 +635,12 @@ std::pair<int, std::vector<ACTION>> Sokoban::recursiveSearchIdastar(SOKOBAN_NODE
   return std::make_pair(nextLimit, caminho);
 }
 
-SOKOBAN_SOLUTION Sokoban::solveIdAstar(bool verbose){
+SOKOBAN_SOLUTION Sokoban::solveIdAstar(bool verbose, int idastarFlimit){
   std::pair<int, std::vector<ACTION>> solution;
 
   SOKOBAN_NODE* root = makeRootNode();
 
-  int fLimit = root->heuristica;
+  int fLimit = idastarFlimit <= 0 ? root->heuristica : idastarFlimit;
   int heuristicaInicial = fLimit;
 
   int expanded = 0;
@@ -691,6 +696,8 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
   auto expandTestInicial = std::chrono::steady_clock::now();
 
   long long int expanded = 0;
+  long long int addedToOpen = 0;
+  long long int maximumOpenSize = 0;
   std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityAstar> open;
 
   std::unordered_set<SOKOBAN_STATE> closed;
@@ -710,8 +717,12 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
   int highestF = 0;
   int stateExpandDelay = 1000;
 
-  if(initialNode->heuristica < SHRT_MAX)
+  if(initialNode->heuristica < SHRT_MAX){
     open.push(initialNode);
+    addedToOpen++;
+    if(open.size() > maximumOpenSize)
+      maximumOpenSize = open.size();
+  }
 
   while(!open.empty()){
     SOKOBAN_NODE* n = open.top();
@@ -730,7 +741,7 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
       closed.insert(*(n->state));
 
       if(isGoalState(*(n->state)))
-        return extractPath(n, nodes, expanded);
+        return extractPath(n, nodes, expanded, addedToOpen, maximumOpenSize);
 
       expanded++;
 
@@ -756,6 +767,9 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
             if(nl->heuristica < SHRT_MAX){
               nodes.push_back(nl);
               open.push(nl);
+              if(open.size() > maximumOpenSize)
+                maximumOpenSize = open.size();
+              addedToOpen++;
             }
             else{
               delete nl->state;
@@ -788,13 +802,16 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
   return nosol;
 }
 
-SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
+SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
   auto expandTestInicial = std::chrono::steady_clock::now();
 
   long long int expanded = 0;
-  std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityGreedy> open;
+  long long int addedToOpen = 0;
+  long long int maximumOpenSize = 0;
+  std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityAstar> open;
 
   std::unordered_set<SOKOBAN_STATE> closed;
+
   closed.reserve(6000000);
   closed.max_load_factor(0.9);
 
@@ -810,8 +827,12 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
   int highestF = 0;
   int stateExpandDelay = 1000;
 
-  if(initialNode->heuristica < SHRT_MAX)
+  if(initialNode->heuristica < SHRT_MAX){
     open.push(initialNode);
+    if(open.size() > maximumOpenSize)
+      maximumOpenSize = open.size();
+    addedToOpen++;
+  }
 
   while(!open.empty()){
     SOKOBAN_NODE* n = open.top();
@@ -830,7 +851,138 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
       closed.insert(*(n->state));
 
       if(isGoalState(*(n->state)))
-        return extractPath(n, nodes, expanded);
+        return extractPath(n, nodes, expanded, addedToOpen, maximumOpenSize);
+
+      expanded++;
+
+      if(verbose && expanded % stateExpandDelay == 0){
+        auto expandTestFinal = std::chrono::steady_clock::now();
+        long long int expandTestTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(expandTestFinal - expandTestInicial).count();
+        printf("Expanded: %lld States\n", expanded);
+        if(expandTestTotal < 3000)
+          stateExpandDelay = stateExpandDelay*10;
+        if(expandTestTotal > 30000)
+          stateExpandDelay = stateExpandDelay/2;
+        expandTestInicial = expandTestFinal;
+      }
+
+      int minAddF = 9999;
+      for(std::pair<ACTION, SOKOBAN_STATE> s : getSucc(*(n->state))){
+
+        if(closed.find(s.second) == closed.end()){
+          if(this->lowMemory && !movedBox(s.second, s.first) && !checkMoveCloser(*(n->state), s.first)){
+            closed.insert(s.second);
+          }
+          else{
+            SOKOBAN_NODE* nl = makeNode(n, s.first, s.second);
+
+            if(nl->heuristica < SHRT_MAX){
+              if(nl->pathCost + nl->heuristica < n->pathCost + n->heuristica + n->additionalF){
+                delete nl->state;
+                delete nl;
+              }
+              else if(nl->pathCost + nl->heuristica == n->pathCost + n->heuristica + n->additionalF){
+                nodes.push_back(nl);
+                open.push(nl);
+                if(open.size() > maximumOpenSize)
+                  maximumOpenSize = open.size();
+                addedToOpen++;
+              }
+              else{
+                if(nl->pathCost + nl->heuristica < n->pathCost + n->heuristica + n->additionalF + minAddF){
+                  minAddF = (nl->pathCost + nl->heuristica) - n->pathCost - n->heuristica - n->additionalF;
+                }
+                delete nl->state;
+                delete nl;
+              }
+            }
+            else{
+              delete nl->state;
+              delete nl;
+            }
+          }
+        }
+      }
+
+      if(minAddF < 9999){
+        n->additionalF = n->additionalF + minAddF;
+        open.push(n);
+        if(open.size() > maximumOpenSize)
+          maximumOpenSize = open.size();
+        closed.erase(*(n->state));
+        addedToOpen++;
+      }
+      else{
+        delete n->state;
+        n->state = nullptr;
+      }
+    }
+  }
+
+  for(SOKOBAN_NODE* n : nodes){
+    delete n->state;
+    delete n;
+  }
+
+  SOKOBAN_SOLUTION nosol;
+  nosol.path.clear();
+  nosol.cost = NO_SOLUTION;
+  nosol.expanded = expanded;
+  nosol.heuristicaInicial = heuristicaInicial;
+
+  if(!open.empty())
+    nosol.cost = NO_RAM;
+
+  return nosol;
+}
+
+SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
+  auto expandTestInicial = std::chrono::steady_clock::now();
+
+  long long int expanded = 0;
+  long long int addedToOpen = 0;
+  long long int maximumOpenSize = 0;
+  std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityGreedy> open;
+
+  std::unordered_set<SOKOBAN_STATE> closed;
+  closed.reserve(6000000);
+  closed.max_load_factor(0.9);
+
+  std::vector<SOKOBAN_NODE*> nodes;
+
+  SOKOBAN_NODE* initialNode = makeRootNode();
+  nodes.push_back(initialNode);
+
+  int heuristicaInicial = initialNode->heuristica;
+
+  //Verbose stuff
+  int lowestH = SHRT_MAX;
+  int highestF = 0;
+  int stateExpandDelay = 1000;
+
+  if(initialNode->heuristica < SHRT_MAX){
+    open.push(initialNode);
+    addedToOpen++;
+  }
+
+  while(!open.empty()){
+    SOKOBAN_NODE* n = open.top();
+    open.pop();
+
+    if(verbose && n->heuristica < lowestH){
+      lowestH = n->heuristica;
+      printf("Lowest Heuristic: %d\n", lowestH);
+    }
+    if(verbose && n->pathCost + n->heuristica > highestF){
+      highestF = n->pathCost + n->heuristica;
+      printf("Highest F-Value: %d\n", highestF);
+    }
+
+    if(closed.find(*(n->state)) == closed.end()){
+      closed.insert(*(n->state));
+
+      if(isGoalState(*(n->state)))
+        return extractPath(n, nodes, expanded, addedToOpen, maximumOpenSize);
 
       expanded++;
 
@@ -851,6 +1003,9 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
           if(nl->heuristica < SHRT_MAX){
             nodes.push_back(nl);
             open.push(nl);
+            if(open.size() > maximumOpenSize)
+              maximumOpenSize = open.size();
+            addedToOpen++;
           }
           else{
             delete nl->state;
@@ -1049,6 +1204,7 @@ SOKOBAN_NODE* Sokoban::makeRootNode(){
   node->state = initialState;
   node->heuristica = fHeuristica(*(node->state));
   node->pathCost = 0;
+  node->additionalF = 0;
   return node;
 }
 
@@ -1060,6 +1216,7 @@ SOKOBAN_NODE* Sokoban::makeNode(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE 
   *(node->state) = state;
   node->heuristica = fHeuristica(state);
   node->pathCost = node->parent->pathCost + 1;
+  node->additionalF = 0;
   return node;
 }
 
