@@ -1,4 +1,11 @@
+.vscode/
 bin/
 sokoban
 sokoban.exe
 samples/Lev.txt
+GameSokobanData/data.txt
+GameSokobanData/Solutions.txt
+GameSokobanData/Levels/
+GameSokobanData/Solutions/
+GameSokobanData/lev.txt
+lev.txt

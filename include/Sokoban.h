@@ -1,12 +1,7 @@
-#include <cstdio>
-#include <cmath>
-#include <vector>
-#include <utility>
-#include <unordered_set>
-#include <unordered_map>
-#include <set>
+#ifndef SOKOBAN_H
+#define SOKOBAN_H
 
-#define RAM_LIMIT 1000000000
+#define RAM_LIMIT 95
 #define NO_SOLUTION -1
 #define NO_RAM -2
 
@@ -22,29 +17,30 @@ struct SOKOBAN_SOLUTION{
   long long int timeMilis;
   long long int expanded;
   long long int addedToOpen;
-  long long int maximumOpenSize;
 
   int heuristicaInicial;
 };
 
-typedef short int POSITION;
+#pragma pack(push, 1)
 
 struct SOKOBAN_STATE{
+  BoxPositionSet boxPositions;
   POSITION playerPosition;
-  std::set<POSITION> boxPositions;
 
   bool operator==(const SOKOBAN_STATE &s2) const{
 
-    if(playerPosition == s2.playerPosition){
-      for(POSITION p : boxPositions){
-        if(s2.boxPositions.find(p) == s2.boxPositions.end())
-          return false;
-      }
+    if(playerPosition != s2.playerPosition)
+      return false;
 
-      return true;
+    ConstantSetIterator it1 = boxPositions.begin();
+    ConstantSetIterator it2 = s2.boxPositions.begin();
+    for(int i = 0; i < BoxPositionSet::STATE_BOX_QUANT; i++){
+      if(*it1 != *it2)
+        return false;
+      it1++;
+      it2++;
     }
-
-    return false;
+    return true;
   }
 };
 
@@ -71,17 +67,21 @@ typedef struct soknode{
   soknode *parent;
   ACTION action;
   short int additionalF;
+  unsigned char nSuccs;
 } SOKOBAN_NODE;
+
+#pragma pack(pop)
 
 class Sokoban{
   public:
     Sokoban(FILE* inputMap);
     ~Sokoban();
 
-    SOKOBAN_SOLUTION solve(bool verbose, bool lowMemory, bool greedy, ALGO algo, int idastarFlimit);
+    SOKOBAN_SOLUTION solve(bool verbose, bool lowMemory, ALGO algo, int idastarFlimit, int ramLimit);
   private:
     int mapLenX, mapLenY;
     int mapBoxQuant;
+    int ramLimit;
     bool lowMemory;
 
     char *gameMap;
@@ -115,6 +115,8 @@ class Sokoban{
     bool *tickedRows;
     bool *tickedCols;
 
+    bool *treatWall;
+
     int *distBoxesPP;
     int *distBoxesNPP;
 
@@ -123,11 +125,11 @@ class Sokoban{
     SOKOBAN_NODE* makeRootNode();
     SOKOBAN_NODE* makeNode(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE &state);
     SOKOBAN_NODE* makeNodePreSearch(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE &state, POSITION goal, int gValue);
-    SOKOBAN_SOLUTION extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen, long long int maximumOpenSize);
+    SOKOBAN_SOLUTION extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen);
 
     //Aux Functions
     bool checkFrozen(SOKOBAN_STATE &state, POSITION boxPosition);
-    bool isFrozen(SOKOBAN_STATE &state, POSITION boxPosition, bool xFrozen, bool yFrozen, bool *treatWall);
+    bool isFrozen(SOKOBAN_STATE &state, POSITION boxPosition, bool xFrozen, bool yFrozen);
     bool movedBox(SOKOBAN_STATE &state, ACTION action);
     ACTION opposite(ACTION action);
     int getTileDistance(POSITION a, POSITION b);
@@ -137,3 +139,5 @@ class Sokoban{
     void calculateTileDistances();
     void calculateBoxTileDistances();
 };
+
+#endif

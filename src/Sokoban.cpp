@@ -1,10 +1,107 @@
+#include "../include/pcheaders.h"
+#include "../include/BoxPositionSet.h"
 #include "../include/Sokoban.h"
-#include <queue>
-#include <climits>
-#include <chrono>
+#include "../include/NodeManager.h"
+
+#ifdef _WIN32
 #include <sys/types.h>
+#include <windows.h>
+#endif
+
+#ifdef __linux__
+#include<unistd.h>
+
+typedef uint32_t DWORD;
+typedef uint64_t DWORDLONG;
+
+typedef struct _MEMORYSTATUSEX {
+  DWORD     dwLength;
+  DWORD     dwMemoryLoad;
+  /*
+  DWORDLONG ullTotalPhys;
+  DWORDLONG ullAvailPhys;
+  DWORDLONG ullTotalPageFile;
+  DWORDLONG ullAvailPageFile;
+  DWORDLONG ullTotalVirtual;
+  DWORDLONG ullAvailVirtual;
+  DWORDLONG ullAvailExtendedVirtual;
+  */
+} MEMORYSTATUSEX;
+
+int _lin_int_from_string(char *str){
+  int result = 0;
+  while(*str != '\0'){
+    result = result * 10 + (*str - '0');
+    str++;
+  }
+  return result;
+}
+
+void GlobalMemoryStatusEx(MEMORYSTATUSEX* msx){
+  static DWORD result = 0;
+  static time_t lastCheck = 0;
+
+  time_t cTime = time(0);
+  if(cTime - lastCheck < 5){
+    msx->dwMemoryLoad = result;
+    return;
+  }
+  lastCheck = cTime;
+
+  char c;
+  char bufAv[256];
+  char bufTot[256];
+  int auxI = 0;
+  FILE* fp = NULL;
+  do{
+    fp = popen("head -n3 /proc/meminfo", "r");
+    if(fp){
+      c = fgetc(fp);
+      if(c != 'M'){
+        pclose(fp);
+        fp = NULL;
+      }
+    }
+  }while(fp == NULL);
+
+  while(c < '0' || c > '9')
+      c = fgetc(fp);
+  while(!(c < '0' || c > '9')){
+      bufTot[auxI] = c;
+      auxI++;
+      c = fgetc(fp);
+  }
+  bufTot[auxI] = '\0';
+  auxI = 0;
+  while(c != '\n')
+      c = fgetc(fp);
+  c = fgetc(fp);
+  while(c != '\n')
+      c = fgetc(fp);
+  while(c < '0' || c > '9')
+      c = fgetc(fp);
+  while(!(c < '0' || c > '9')){
+      bufAv[auxI] = c;
+      auxI++;
+      c = fgetc(fp);
+  }
+  bufAv[auxI] = '\0';
+  pclose(fp);
+
+  const int mTotal = _lin_int_from_string(bufTot);
+  const int mAvail = _lin_int_from_string(bufAv);
+  const int mUsed = mTotal - mAvail;
+
+  msx->dwMemoryLoad = (mUsed * 100) / mTotal;
+  result = msx->dwMemoryLoad;
+}
+#endif
+
+int BoxPositionSet::STATE_BOX_QUANT = 0;
 
 Sokoban::Sokoban(FILE* inputMap){
+  this->ramLimit = RAM_LIMIT;
+
   std::vector<std::vector<char>> tempGameMap;
   std::vector<char> line;
   char c;
@@ -24,8 +121,8 @@ Sokoban::Sokoban(FILE* inputMap){
 
       tempGameMap.push_back(line);
 
-      if(line.size() > biggestLine)
-        biggestLine = line.size();
+      if((int) line.size() > biggestLine)
+        biggestLine = (int) line.size();
     }
   }
 
@@ -50,6 +147,8 @@ Sokoban::Sokoban(FILE* inputMap){
     }
   }
 
+  BoxPositionSet::STATE_BOX_QUANT = this->mapBoxQuant;
+
   this->mmMatrix = new int[this->mapBoxQuant * this->mapBoxQuant];
   this->staticmmMatrix = new int[this->mapBoxQuant * this->mapBoxQuant];
   this->goalAssigned = new int[this->mapBoxQuant];
@@ -61,6 +160,7 @@ Sokoban::Sokoban(FILE* inputMap){
   this->tickedRows = new bool[this->mapBoxQuant];
   this->tickedCols = new bool[this->mapBoxQuant];
 
+  this->treatWall = new bool[this->mapLenX * this->mapLenY];
 
   this->distBoxesPP = new int[this->mapLenX * this->mapLenY];
   this->distBoxesNPP = new int[this->mapLenX * this->mapLenY];
@@ -212,6 +312,7 @@ Sokoban::~Sokoban(){
   delete[] this->tickedRows;
   delete[] this->tickedCols;
 
+  delete[] this->treatWall;
 
   delete[] this->distBoxesPP;
   delete[] this->distBoxesNPP;
@@ -236,8 +337,8 @@ struct ComparePriorityGreedy {
 
 int Sokoban::fHeuristica(SOKOBAN_STATE &state){
   int result = 0;
-  int distMin;
 
+  /*
   //Calculate player distance to closest box
   int d = SHRT_MAX;
   int d2;
@@ -269,12 +370,13 @@ int Sokoban::fHeuristica(SOKOBAN_STATE &state){
     }
   }
   result = result + d;
+  */
 
-  //for(POSITION bp : state.boxPositions)
-  //  result = result + this->minGoalDistance[bp];
-  //return result;
+  for(POSITION bp : state.boxPositions)
+    result = result + this->minGoalDistance[bp];
+  return result;
 
-  //MM
+  //Minimum Matching assignment
   int row = 0;
   int minimum;
   for(POSITION bp : state.boxPositions){
@@ -308,7 +410,6 @@ int Sokoban::fHeuristica(SOKOBAN_STATE &state){
   }
 
   bool foundAssing = false;
-  bool exitTest = false;
 
   while(!foundAssing){
     for(int i = 0; i < this->mapBoxQuant; i++){
@@ -524,19 +625,18 @@ bool Sokoban::forceAssing(int col){
   return false;
 }
 
-SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen, long long int maximumOpenSize){
+SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen){
   SOKOBAN_SOLUTION sol;
   sol.cost = n->pathCost;
   sol.expanded = expanded;
   sol.addedToOpen = addedToOpen;
-  sol.maximumOpenSize = maximumOpenSize;
 
   while(n->parent != NULL){
     sol.path.push_back(n->action);
     n = n->parent;
   }
 
-  for(int i = 0; i < sol.path.size()/2; i++){
+  for(int i = 0; i < (int) sol.path.size()/2; i++){
     ACTION aux = sol.path[i];
     sol.path[i] = sol.path[sol.path.size()-1-i];
     sol.path[sol.path.size()-1-i] = aux;
@@ -557,12 +657,16 @@ SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*
   return sol;
 }
 
-SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, bool greedy, ALGO algo, int idastarFlimit){
+SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, ALGO algo, int idastarFlimit, int ramLimit){
   auto tempoInicial = std::chrono::steady_clock::now();
 
   SOKOBAN_SOLUTION solution;
 
   this->lowMemory = lowMemory;
+
+  if(ramLimit >= 1 && ramLimit <= 98){
+    this->ramLimit = ramLimit;
+  }
 
   switch (algo) {
     case ASTAR:
@@ -663,7 +767,7 @@ SOKOBAN_SOLUTION Sokoban::solveIdAstar(bool verbose, int idastarFlimit){
       sol.cost = solution.first;
       sol.expanded = expanded;
       sol.path = solution.second;
-      for(int i = 0; i < sol.path.size()/2; i++){
+      for(int i = 0; i < (int) sol.path.size()/2; i++){
         ACTION auxA = sol.path[i];
         sol.path[i] = sol.path[sol.path.size()-1-i];
         sol.path[sol.path.size()-1-i] = auxA;
@@ -689,6 +793,8 @@ SOKOBAN_SOLUTION Sokoban::solveIdAstar(bool verbose, int idastarFlimit){
   nosol.cost = -1;
   nosol.expanded = expanded;
   nosol.heuristicaInicial = heuristicaInicial;
+  nosol.addedToOpen = 0;
+  nosol.timeMilis = 0;
   return nosol;
 }
 
@@ -697,7 +803,6 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
 
   long long int expanded = 0;
   long long int addedToOpen = 0;
-  long long int maximumOpenSize = 0;
   std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityAstar> open;
 
   std::unordered_set<SOKOBAN_STATE> closed;
@@ -717,11 +822,12 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
   int highestF = 0;
   int stateExpandDelay = 1000;
 
+  MEMORYSTATUSEX statex;
+  statex.dwLength = sizeof (statex);
+
   if(initialNode->heuristica < SHRT_MAX){
     open.push(initialNode);
     addedToOpen++;
-    if(open.size() > maximumOpenSize)
-      maximumOpenSize = open.size();
   }
 
   while(!open.empty()){
@@ -741,14 +847,37 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
       closed.insert(*(n->state));
 
       if(isGoalState(*(n->state)))
-        return extractPath(n, nodes, expanded, addedToOpen, maximumOpenSize);
+        return extractPath(n, nodes, expanded, addedToOpen);
 
       expanded++;
+
+      GlobalMemoryStatusEx (&statex);
+
+      if(statex.dwMemoryLoad >= static_cast<unsigned int>(this->ramLimit)){
+        if(verbose){
+          printf("Out of memory! Terminating...\n");
+        }
+        
+        for(SOKOBAN_NODE* n : nodes){
+          delete n->state;
+          delete n;
+        }
+
+        SOKOBAN_SOLUTION nosol;
+        nosol.path.clear();
+        nosol.cost = NO_RAM;
+        nosol.expanded = expanded;
+        nosol.heuristicaInicial = heuristicaInicial;
+        nosol.addedToOpen = addedToOpen;
+        nosol.timeMilis = 0;
+
+        return nosol;
+      }
 
       if(verbose && expanded % stateExpandDelay == 0){
         auto expandTestFinal = std::chrono::steady_clock::now();
         long long int expandTestTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(expandTestFinal - expandTestInicial).count();
-        printf("Expanded: %lld States\n", expanded);
+        printf("Expanded: %lld States (Mem: %ld / %d)\n", expanded, statex.dwMemoryLoad, this->ramLimit);
         if(expandTestTotal < 3000)
           stateExpandDelay = stateExpandDelay*10;
         if(expandTestTotal > 30000)
@@ -767,8 +896,6 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
             if(nl->heuristica < SHRT_MAX){
               nodes.push_back(nl);
               open.push(nl);
-              if(open.size() > maximumOpenSize)
-                maximumOpenSize = open.size();
               addedToOpen++;
             }
             else{
@@ -795,6 +922,8 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
   nosol.cost = NO_SOLUTION;
   nosol.expanded = expanded;
   nosol.heuristicaInicial = heuristicaInicial;
+  nosol.addedToOpen = addedToOpen;
+  nosol.timeMilis = 0;
 
   if(!open.empty())
     nosol.cost = NO_RAM;
@@ -802,23 +931,47 @@ SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
   return nosol;
 }
 
+/*
+void deleteNodes(std::vector<SOKOBAN_NODE*>& nodes, std::unordered_set<SOKOBAN_NODE*>& toDelete){
+  const int nSize = (int) nodes.size();
+  int deletedCount = 0;
+  for(int i = 0; i < nSize; i++){
+    if(toDelete.find(nodes[i]) != toDelete.end()){
+      deletedCount++;
+      if(nodes[i]->parent != nullptr)
+        nodes[i]->parent->nSuccs = nodes[i]->parent->nSuccs - 1;
+      delete nodes[i]->state;
+      delete nodes[i];
+    }
+    else{
+      nodes[i - deletedCount] = nodes[i];
+    }
+  }
+  nodes.erase(nodes.begin() + nodes.size() - deletedCount, nodes.begin() + nodes.size());
+}
+*/
+
 SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
   auto expandTestInicial = std::chrono::steady_clock::now();
 
   long long int expanded = 0;
   long long int addedToOpen = 0;
-  long long int maximumOpenSize = 0;
+  long long int prevOpenSize = 1;
   std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityAstar> open;
 
   std::unordered_set<SOKOBAN_STATE> closed;
 
-  closed.reserve(6000000);
+  const int NODES_TO_DELETE_SIZE = 200000;
+  std::vector<SOKOBAN_NODE*> nodesToDelete;
+  nodesToDelete.reserve((int) (NODES_TO_DELETE_SIZE));
+
+  closed.reserve(10000000);
   closed.max_load_factor(0.9);
 
   std::vector<SOKOBAN_NODE*> nodes;
+  NodeManager nodeManager(NODES_TO_DELETE_SIZE, 524288);
 
   SOKOBAN_NODE* initialNode = makeRootNode();
-  nodes.push_back(initialNode);
 
   int heuristicaInicial = initialNode->heuristica;
 
@@ -826,11 +979,13 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
   int lowestH = SHRT_MAX;
   int highestF = 0;
   int stateExpandDelay = 1000;
+  long long int repeatedNodes = 0;
+
+  MEMORYSTATUSEX statex;
+  statex.dwLength = sizeof (statex);
 
   if(initialNode->heuristica < SHRT_MAX){
     open.push(initialNode);
-    if(open.size() > maximumOpenSize)
-      maximumOpenSize = open.size();
     addedToOpen++;
   }
 
@@ -844,21 +999,47 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
     }
     if(verbose && n->pathCost + n->heuristica > highestF){
       highestF = n->pathCost + n->heuristica;
-      printf("Highest F-Value: %d\n", highestF);
+      printf("Highest F-Value: %d (BF: %.2f)\n", highestF, ((float) open.size() / prevOpenSize));
+      prevOpenSize = open.size();
     }
 
+    bool keepNode = false;
     if(closed.find(*(n->state)) == closed.end()){
       closed.insert(*(n->state));
 
       if(isGoalState(*(n->state)))
-        return extractPath(n, nodes, expanded, addedToOpen, maximumOpenSize);
+        return extractPath(n, nodes, expanded, addedToOpen);
 
       expanded++;
+
+      GlobalMemoryStatusEx(&statex);
+
+      if(statex.dwMemoryLoad >= static_cast<unsigned int>(this->ramLimit)){
+        if(verbose){
+          printf("Out of memory! Terminating...\n");
+        }
+
+        if(initialNode->state != nullptr){
+          delete initialNode->state;
+          delete initialNode;
+        }
+
+        SOKOBAN_SOLUTION nosol;
+        nosol.path.clear();
+        nosol.cost = NO_RAM;
+        nosol.expanded = expanded;
+        nosol.heuristicaInicial = heuristicaInicial;
+        nosol.addedToOpen = addedToOpen;
+        nosol.timeMilis = 0;
+
+        return nosol;
+      }
 
       if(verbose && expanded % stateExpandDelay == 0){
         auto expandTestFinal = std::chrono::steady_clock::now();
         long long int expandTestTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(expandTestFinal - expandTestInicial).count();
-        printf("Expanded: %lld States\n", expanded);
+        printf("Expanded: %lld States (Mem: %ld / %d) ", expanded, statex.dwMemoryLoad, this->ramLimit);
+        printf("Open: %lld, Nodes: %ld, Closed: %lld, Repeated: %lld\n", (long long int) open.size(), nodeManager.size(), (long long int) closed.size(), repeatedNodes);
         if(expandTestTotal < 3000)
           stateExpandDelay = stateExpandDelay*10;
         if(expandTestTotal > 30000)
@@ -868,47 +1049,35 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
 
       int minAddF = 9999;
       for(std::pair<ACTION, SOKOBAN_STATE> s : getSucc(*(n->state))){
-
         if(closed.find(s.second) == closed.end()){
           if(this->lowMemory && !movedBox(s.second, s.first) && !checkMoveCloser(*(n->state), s.first)){
             closed.insert(s.second);
           }
-          else{
-            SOKOBAN_NODE* nl = makeNode(n, s.first, s.second);
+          else{const int fH = fHeuristica(s.second);
 
-            if(nl->heuristica < SHRT_MAX){
-              if(nl->pathCost + nl->heuristica < n->pathCost + n->heuristica + n->additionalF){
-                delete nl->state;
-                delete nl;
-              }
-              else if(nl->pathCost + nl->heuristica == n->pathCost + n->heuristica + n->additionalF){
-                nodes.push_back(nl);
-                open.push(nl);
-                if(open.size() > maximumOpenSize)
-                  maximumOpenSize = open.size();
-                addedToOpen++;
-              }
-              else{
-                if(nl->pathCost + nl->heuristica < n->pathCost + n->heuristica + n->additionalF + minAddF){
-                  minAddF = (nl->pathCost + nl->heuristica) - n->pathCost - n->heuristica - n->additionalF;
+            if(fH < SHRT_MAX){
+              if(n->pathCost + 1 + fH >= n->pathCost + n->heuristica + n->additionalF){
+              
+                if(n->pathCost + 1 + fH == n->pathCost + n->heuristica + n->additionalF){
+                  SOKOBAN_NODE* nl = nodeManager.makeNode(n, s.first, s.second, fH);
+                  open.push(nl);
+                  addedToOpen++;
                 }
-                delete nl->state;
-                delete nl;
+                else{
+                  if(n->pathCost + 1 + fH < n->pathCost + n->heuristica + n->additionalF + minAddF){
+                    minAddF = (n->pathCost + 1 + fH) - n->pathCost - n->heuristica - n->additionalF;
+                  }
+                }
               }
-            }
-            else{
-              delete nl->state;
-              delete nl;
             }
           }
         }
       }
 
       if(minAddF < 9999){
+        keepNode = true;
         n->additionalF = n->additionalF + minAddF;
         open.push(n);
-        if(open.size() > maximumOpenSize)
-          maximumOpenSize = open.size();
         closed.erase(*(n->state));
         addedToOpen++;
       }
@@ -917,11 +1086,19 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
         n->state = nullptr;
       }
     }
+    
+    if(n->nSuccs == 0 && !keepNode){
+      nodesToDelete.push_back(n);
+      if(nodesToDelete.size() == NODES_TO_DELETE_SIZE){
+        nodeManager.deleteNodes(nodesToDelete);
+      }
+      repeatedNodes++;
+    }
   }
 
-  for(SOKOBAN_NODE* n : nodes){
-    delete n->state;
-    delete n;
+  if(initialNode->state != nullptr){
+    delete initialNode->state;
+    delete initialNode;
   }
 
   SOKOBAN_SOLUTION nosol;
@@ -929,9 +1106,8 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
   nosol.cost = NO_SOLUTION;
   nosol.expanded = expanded;
   nosol.heuristicaInicial = heuristicaInicial;
-
-  if(!open.empty())
-    nosol.cost = NO_RAM;
+  nosol.addedToOpen = addedToOpen;
+  nosol.timeMilis = 0;
 
   return nosol;
 }
@@ -941,7 +1117,6 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
 
   long long int expanded = 0;
   long long int addedToOpen = 0;
-  long long int maximumOpenSize = 0;
   std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityGreedy> open;
 
   std::unordered_set<SOKOBAN_STATE> closed;
@@ -960,6 +1135,9 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
   int highestF = 0;
   int stateExpandDelay = 1000;
 
+  MEMORYSTATUSEX statex;
+  statex.dwLength = sizeof (statex);
+
   if(initialNode->heuristica < SHRT_MAX){
     open.push(initialNode);
     addedToOpen++;
@@ -982,14 +1160,37 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
       closed.insert(*(n->state));
 
       if(isGoalState(*(n->state)))
-        return extractPath(n, nodes, expanded, addedToOpen, maximumOpenSize);
+        return extractPath(n, nodes, expanded, addedToOpen);
 
       expanded++;
+
+      GlobalMemoryStatusEx (&statex);
+
+      if(statex.dwMemoryLoad >= static_cast<unsigned int>(this->ramLimit)){
+        if(verbose){
+          printf("Out of memory! Terminating...\n");
+        }
+
+        for(SOKOBAN_NODE* n : nodes){
+          delete n->state;
+          delete n;
+        }
+
+        SOKOBAN_SOLUTION nosol;
+        nosol.path.clear();
+        nosol.cost = NO_RAM;
+        nosol.expanded = expanded;
+        nosol.heuristicaInicial = heuristicaInicial;
+        nosol.addedToOpen = addedToOpen;
+        nosol.timeMilis = 0;
+
+        return nosol;
+      }
 
       if(verbose && expanded % stateExpandDelay == 0){
         auto expandTestFinal = std::chrono::steady_clock::now();
         long long int expandTestTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(expandTestFinal - expandTestInicial).count();
-        printf("Expanded: %lld States\n", expanded);
+        printf("Expanded: %lld States (Mem: %ld / %d)\n", expanded, statex.dwMemoryLoad, this->ramLimit);
         if(expandTestTotal < 3000)
           stateExpandDelay = stateExpandDelay*10;
         if(expandTestTotal > 30000)
@@ -1003,8 +1204,6 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
           if(nl->heuristica < SHRT_MAX){
             nodes.push_back(nl);
             open.push(nl);
-            if(open.size() > maximumOpenSize)
-              maximumOpenSize = open.size();
             addedToOpen++;
           }
           else{
@@ -1029,6 +1228,8 @@ SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
   nosol.cost = NO_SOLUTION;
   nosol.expanded = expanded;
   nosol.heuristicaInicial = heuristicaInicial;
+  nosol.addedToOpen = addedToOpen;
+  nosol.timeMilis = 0;
 
   if(!open.empty())
     nosol.cost = NO_RAM;
@@ -1205,6 +1406,7 @@ SOKOBAN_NODE* Sokoban::makeRootNode(){
   node->heuristica = fHeuristica(*(node->state));
   node->pathCost = 0;
   node->additionalF = 0;
+  node->nSuccs = 0;
   return node;
 }
 
@@ -1217,6 +1419,9 @@ SOKOBAN_NODE* Sokoban::makeNode(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE 
   node->heuristica = fHeuristica(state);
   node->pathCost = node->parent->pathCost + 1;
   node->additionalF = 0;
+
+  node->parent->nSuccs = node->parent->nSuccs + 1;
+  node->nSuccs = 0;
   return node;
 }
 
@@ -1237,19 +1442,13 @@ SOKOBAN_NODE* Sokoban::makeNodePreSearch(SOKOBAN_NODE* prt, ACTION action, SOKOB
 
 //Aux Functions
 bool Sokoban::checkFrozen(SOKOBAN_STATE &state, POSITION boxPosition){
-  bool *treatWall = new bool[this->mapLenX * this->mapLenY];
-
   for(int j = 0; j < this->mapLenX * this->mapLenY; j++)
-    treatWall[j] = false;
+    this->treatWall[j] = false;
 
-  bool result = isFrozen(state, boxPosition, false, false, treatWall);
-
-  delete[] treatWall;
-
-  return result;
+  return isFrozen(state, boxPosition, false, false);
 }
 
-bool Sokoban::isFrozen(SOKOBAN_STATE &state, POSITION boxPosition, bool xFrozen, bool yFrozen, bool *treatWall){
+bool Sokoban::isFrozen(SOKOBAN_STATE &state, POSITION boxPosition, bool xFrozen, bool yFrozen){
   POSITION p;
 
   if(!xFrozen){
@@ -1267,11 +1466,11 @@ bool Sokoban::isFrozen(SOKOBAN_STATE &state, POSITION boxPosition, bool xFrozen,
       xFrozen = true;
     if(boxPosition % this->mapLenX != 0 && state.boxPositions.find(boxPosition-1) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
-      xFrozen = treatWall[boxPosition-1] || isFrozen(state, boxPosition-1, true, false, treatWall);
+      xFrozen = treatWall[boxPosition-1] || isFrozen(state, boxPosition-1, true, false);
     }
     else if((boxPosition+1) % this->mapLenX != 0 && state.boxPositions.find(boxPosition+1) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
-      xFrozen = treatWall[boxPosition+1] || isFrozen(state, boxPosition+1, true, false, treatWall);
+      xFrozen = treatWall[boxPosition+1] || isFrozen(state, boxPosition+1, true, false);
     }
   }
   if(!yFrozen){
@@ -1289,11 +1488,11 @@ bool Sokoban::isFrozen(SOKOBAN_STATE &state, POSITION boxPosition, bool xFrozen,
       yFrozen = true;
     if(boxPosition - this->mapLenX >= 0 && state.boxPositions.find(boxPosition - this->mapLenX) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
-      yFrozen = treatWall[boxPosition - this->mapLenX] || isFrozen(state, boxPosition - this->mapLenX, false, true, treatWall);
+      yFrozen = treatWall[boxPosition - this->mapLenX] || isFrozen(state, boxPosition - this->mapLenX, false, true);
     }
     else if(boxPosition + this->mapLenX < this->mapLenX * this->mapLenY && state.boxPositions.find(boxPosition + this->mapLenX) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
-      yFrozen = treatWall[boxPosition + this->mapLenX] || isFrozen(state, boxPosition + this->mapLenX, false, true, treatWall);
+      yFrozen = treatWall[boxPosition + this->mapLenX] || isFrozen(state, boxPosition + this->mapLenX, false, true);
     }
   }
 
@@ -1316,7 +1515,7 @@ bool Sokoban::movedBox(SOKOBAN_STATE &state, ACTION action){
 }
 
 ACTION Sokoban::opposite(ACTION action){
-  ACTION result;
+  ACTION result = UP;
   switch(action){
     case UP:
       result = DOWN;
