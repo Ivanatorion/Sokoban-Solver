@@ -3,24 +3,111 @@
 #include "../include/Sokoban.h"
 #include "../include/GameSokoban.h"
 
+#include <iostream>
+
 #ifdef _WIN32
 #include <urlmon.h>
+#include <thread>
+
+BOOL CALLBACK _enumWindowCallback(HWND hWnd, LPARAM lparam) {
+    char buffer[256];
+    GetWindowText(hWnd, (LPSTR) buffer, 256);
+    std::string windowTitle(buffer);
+
+    // List visible windows
+    if (IsWindowVisible(hWnd)) {
+        if(windowTitle.find("level") != std::string::npos){
+            *((HWND *) lparam) = hWnd;
+            std::cout << hWnd << ":  " << windowTitle << std::endl;
+        }
+    }
+    return TRUE;
+}
+
+HWND getWindow(){
+    HWND wnd = NULL;
+    EnumWindows(_enumWindowCallback, (LPARAM) &wnd);
+    return wnd;
+}
 
 void GameSokoban::sendSolution(const int levelN, const std::vector<ACTION>& solution){
+    char buffer[256];
+
     INPUT ip;
     ip.type = INPUT_KEYBOARD;
     ip.ki.wScan = 0;
     ip.ki.time = 0;
     ip.ki.dwExtraInfo = 0;
 
-    char buffer[256];
-    sprintf(buffer, "http://www.game-sokoban.com/index.php?mode=level&lid=%d", levelN);
+    INPUT ip2 = ip;
 
-    ShellExecute(NULL, NULL, buffer, NULL, NULL, SW_SHOW);
-    Sleep(3000);
+    ip.ki.wVk = VK_CONTROL;
+    ip2.ki.wVk = 'T';
+
+    ip.ki.dwFlags = 0; // 0 for key pressw
+    SendInput(1, &ip, sizeof(INPUT));
+
+    ip2.ki.dwFlags = 0; // 0 for key pressw
+    SendInput(1, &ip2, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    ip.ki.dwFlags = 0; // 0 for key pressw
+    SendInput(1, &ip, sizeof(INPUT));
+
+    ip2.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+    SendInput(1, &ip2, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2200));
+
+    sprintf(buffer, "http://www.game-sokoban.com/index.php?mode=level&lid=%d", levelN); 
+    
+    if(OpenClipboard(NULL))
+    {
+        HGLOBAL clipbuffer;
+        char * buffer2;
+        EmptyClipboard();
+        clipbuffer = GlobalAlloc(GMEM_DDESHARE, strlen(buffer) + 1);
+        buffer2 = (char*)GlobalLock(clipbuffer);
+        strcpy(buffer2, LPCSTR(buffer));
+        GlobalUnlock(clipbuffer);
+        SetClipboardData(CF_TEXT,clipbuffer);
+        CloseClipboard();
+    }
+
+    ip.ki.wVk = VK_CONTROL;
+    ip2.ki.wVk = 'V';
+
+    ip.ki.dwFlags = 0; // 0 for key pressw
+
+    SendInput(1, &ip, sizeof(INPUT));
+
+    ip2.ki.dwFlags = 0; // 0 for key pressw
+    SendInput(1, &ip2, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ip.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+    SendInput(1, &ip, sizeof(INPUT));
+
+    ip2.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+    SendInput(1, &ip2, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+    ip.ki.wVk = VK_RETURN;
+    ip.ki.dwFlags = 0; // 0 for key pressw
+    SendInput(1, &ip, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ip.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+    SendInput(1, &ip, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(3100));
 
     for(int i = 0; i < (int) solution.size(); i++){
-      Sleep(400);
+      std::this_thread::sleep_for(std::chrono::milliseconds(330));
       switch(solution[i]){
         case UP:
             ip.ki.wVk = VK_UP;
@@ -42,6 +129,31 @@ void GameSokoban::sendSolution(const int levelN, const std::vector<ACTION>& solu
       ip.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
       SendInput(1, &ip, sizeof(INPUT));
     }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+
+    ip.ki.wVk = VK_CONTROL;
+    ip2.ki.wVk = 'W';
+
+    ip.ki.dwFlags = 0; // 0 for key pressw
+    SendInput(1, &ip, sizeof(INPUT));
+
+    ip2.ki.dwFlags = 0; // 0 for key pressw
+    SendInput(1, &ip2, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ip.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+    SendInput(1, &ip, sizeof(INPUT));
+
+    ip2.ki.dwFlags = KEYEVENTF_KEYUP; // KEYEVENTF_KEYUP for key release
+    SendInput(1, &ip2, sizeof(INPUT));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+}
+
+GameSokoban::GameSokoban(){
+    ShellExecute(NULL, NULL, "http://www.game-sokoban.com/", NULL, NULL, SW_SHOW);
 }
 
 #endif
@@ -71,11 +183,11 @@ void GameSokoban::sendSolution(const int levelN, const std::vector<ACTION>& solu
     printf("ERROR: sendSolution not implemented on linux!\n");
 }
 
-#endif
-
 GameSokoban::GameSokoban(){
     
 }
+
+#endif
 
 bool GameSokoban::getLevel(const int levelN, const char filePath[]){
     char bufferURL[1024];

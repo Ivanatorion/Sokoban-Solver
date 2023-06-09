@@ -5,10 +5,10 @@
 #define NO_SOLUTION -1
 #define NO_RAM -2
 
-enum ACTION {UP, DOWN, LEFT, RIGHT};
-enum GAME_TILE {EMPTY = ' ', WALL = '#', BOX = '$', GOAL = '.', PLAYER = '@', GOAL_AND_BOX = '*', PLAYER_AND_GOAL = '+'};
+#pragma pack(push, 1)
 
-enum ALGO {ASTAR, GREEDY, IDASTAR, PEASTAR};
+enum ACTION {UP = 0, DOWN = 1, LEFT = 2, RIGHT = 3};
+enum GAME_TILE {EMPTY = ' ', WALL = '#', BOX = '$', GOAL = '.', PLAYER = '@', GOAL_AND_BOX = '*', PLAYER_AND_GOAL = '+'};
 
 struct SOKOBAN_SOLUTION{
   int cost;
@@ -18,10 +18,8 @@ struct SOKOBAN_SOLUTION{
   long long int expanded;
   long long int addedToOpen;
 
-  int heuristicaInicial;
+  int initialHeuristic;
 };
-
-#pragma pack(push, 1)
 
 struct SOKOBAN_STATE{
   BoxPositionSet boxPositions;
@@ -44,6 +42,15 @@ struct SOKOBAN_STATE{
   }
 };
 
+struct TUNNEL_MACRO {
+  POSITION player;
+  POSITION box;
+
+  bool operator==(const TUNNEL_MACRO &s2) const{
+    return player == s2.player && box == s2.box;
+  }
+};
+
 namespace std {
     template<> struct hash<SOKOBAN_STATE>
     {
@@ -58,16 +65,29 @@ namespace std {
             return result;
         }
     };
+
+    template<> struct hash<TUNNEL_MACRO>
+    {
+        std::size_t operator()(const TUNNEL_MACRO& tm) const noexcept
+        {
+            size_t result = static_cast<size_t>(tm.player) * 65536 + static_cast<size_t>(tm.box);    
+            return result;
+        }
+    };
 }
 
-typedef struct soknode{
+typedef struct soknode_info{
   short int pathCost;
-  short int heuristica;
-  SOKOBAN_STATE *state;
+  short int heuristic;
+  short int additionalF;
+  SOKOBAN_STATE state;
+} NodeInfo;
+
+typedef struct soknode{
+  NodeInfo *info;
   soknode *parent;
   ACTION action;
-  short int additionalF;
-  unsigned char nSuccs;
+  unsigned char nUseCount;
 } SOKOBAN_NODE;
 
 #pragma pack(pop)
@@ -77,9 +97,9 @@ class Sokoban{
     Sokoban(FILE* inputMap);
     ~Sokoban();
 
-    SOKOBAN_SOLUTION solve(bool verbose, bool lowMemory, ALGO algo, int idastarFlimit, int ramLimit);
+    SOKOBAN_SOLUTION solve(bool verbose, bool lowMemory, int ramLimit);
   private:
-    int mapLenX, mapLenY;
+    int mapLenX, mapLenY, mapLenTotal;
     int mapBoxQuant;
     int ramLimit;
     bool lowMemory;
@@ -89,43 +109,30 @@ class Sokoban{
     bool *isDeadEnd;
 
     bool *isGoal;
-    std::vector<POSITION> goalPositions;
 
     int *minGoalDistance;
 
     int *tileDistances; //Distances between tiles (player)
     int *boxTileDistances; //Distances beween tiles (boxes)
 
-    SOKOBAN_SOLUTION solveAstar(bool verbose);
     SOKOBAN_SOLUTION solvePEAstar(bool verbose);
-    SOKOBAN_SOLUTION solveGBFS(bool verbose);
-
-    std::pair<int, std::vector<ACTION>> recursiveSearchIdastar(SOKOBAN_NODE* node, int fLimit, int *expanded, bool *noneSol, std::unordered_set<SOKOBAN_STATE> &transpositionTable);
-    SOKOBAN_SOLUTION solveIdAstar(bool verbose, int idastarFlimit);
 
     int fHeuristica(SOKOBAN_STATE &state);
-    bool forceAssing(int col);
-    int *mmMatrix, *staticmmMatrix;
-    int *goalAssigned;
-    int *boxAssigned;
-    bool *couldntAssignBox;
-    bool *couldntAssignGoal;
-    int *numberZeroesRow;
-    int *numberZeroesCol;
-    bool *tickedRows;
-    bool *tickedCols;
 
     bool *treatWall;
 
     int *distBoxesPP;
     int *distBoxesNPP;
 
-    std::vector<std::pair<ACTION, SOKOBAN_STATE>> getSucc(SOKOBAN_STATE &state);
+    std::unordered_map<TUNNEL_MACRO, ACTION> tunnelMacros;
+
+    void getSucc(SOKOBAN_STATE& state, SOKOBAN_STATE *succs, bool *valids);
     bool isGoalState(SOKOBAN_STATE &state);
     SOKOBAN_NODE* makeRootNode();
-    SOKOBAN_NODE* makeNode(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE &state);
     SOKOBAN_NODE* makeNodePreSearch(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE &state, POSITION goal, int gValue);
     SOKOBAN_SOLUTION extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen);
+
+    void shrinkOpen(PriQueue* open, StateSet* closed, std::vector<SOKOBAN_NODE*>& nodesToDelete, const bool verbose);
 
     //Aux Functions
     bool checkFrozen(SOKOBAN_STATE &state, POSITION boxPosition);
@@ -138,6 +145,7 @@ class Sokoban{
     void calcTileDistanceBoxes(SOKOBAN_STATE &state, POSITION p1, int *distances);
     void calculateTileDistances();
     void calculateBoxTileDistances();
+    void calculateTunnelMacros();
 };
 
 #endif

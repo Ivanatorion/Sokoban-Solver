@@ -1,7 +1,9 @@
 #include "../include/pcheaders.h"
 #include "../include/BoxPositionSet.h"
 #include "../include/Sokoban.h"
+#include "../include/PriQueue.h"
 #include "../include/NodeManager.h"
+#include "../include/StateSet.h"
 
 #ifdef _WIN32
 #include <sys/types.h>
@@ -131,11 +133,12 @@ Sokoban::Sokoban(FILE* inputMap){
 
   this->mapLenX = biggestLine;
   this->mapLenY = tempGameMap.size();
+  this->mapLenTotal = this->mapLenX * this->mapLenY;
 
-  this->gameMap = new char[this->mapLenX * this->mapLenY];
-  this->isDeadEnd = new bool[this->mapLenX * this->mapLenY];
-  this->isGoal = new bool[this->mapLenX * this->mapLenY];
-  this->minGoalDistance = new int[this->mapLenX * this->mapLenY];
+  this->gameMap = new char[this->mapLenTotal];
+  this->isDeadEnd = new bool[this->mapLenTotal];
+  this->isGoal = new bool[this->mapLenTotal];
+  this->minGoalDistance = new int[this->mapLenTotal];
 
   this->mapBoxQuant = 0;
   for(int y = 0; y < this->mapLenY; y++){
@@ -149,25 +152,13 @@ Sokoban::Sokoban(FILE* inputMap){
 
   BoxPositionSet::STATE_BOX_QUANT = this->mapBoxQuant;
 
-  this->mmMatrix = new int[this->mapBoxQuant * this->mapBoxQuant];
-  this->staticmmMatrix = new int[this->mapBoxQuant * this->mapBoxQuant];
-  this->goalAssigned = new int[this->mapBoxQuant];
-  this->boxAssigned = new int[this->mapBoxQuant];
-  this->couldntAssignBox = new bool[this->mapBoxQuant];
-  this->couldntAssignGoal = new bool[this->mapBoxQuant];
-  this->numberZeroesRow = new int[this->mapBoxQuant];
-  this->numberZeroesCol = new int[this->mapBoxQuant];
-  this->tickedRows = new bool[this->mapBoxQuant];
-  this->tickedCols = new bool[this->mapBoxQuant];
-
-  this->treatWall = new bool[this->mapLenX * this->mapLenY];
-
-  this->distBoxesPP = new int[this->mapLenX * this->mapLenY];
-  this->distBoxesNPP = new int[this->mapLenX * this->mapLenY];
+  this->treatWall = new bool[this->mapLenTotal];
+  this->distBoxesPP = new int[this->mapLenTotal];
+  this->distBoxesNPP = new int[this->mapLenTotal];
 
   std::queue<std::pair<POSITION, int>> q;
   std::unordered_set<POSITION> closed;
-  for(POSITION mapPos = 0; mapPos < this->mapLenX * this->mapLenY; mapPos++){
+  for(POSITION mapPos = 0; mapPos < this->mapLenTotal; mapPos++){
     if(this->gameMap[mapPos] == WALL){
       this->minGoalDistance[mapPos] = SHRT_MAX;
       this->isDeadEnd[mapPos] = false;
@@ -235,24 +226,26 @@ Sokoban::Sokoban(FILE* inputMap){
   }
   while(!q.empty()) q.pop();
 
+  calculateTunnelMacros();
+
   //Calculate Tile Distances
-  this->tileDistances = new int[this->mapLenX * this->mapLenY * this->mapLenX * this->mapLenY];
+  this->tileDistances = new int[this->mapLenTotal * this->mapLenTotal];
   calculateTileDistances();
-  this->boxTileDistances = new int[this->mapLenX * this->mapLenY * this->mapLenX * this->mapLenY];
-  //calculateBoxTileDistances();
+  this->boxTileDistances = new int[this->mapLenTotal * this->mapLenTotal];
+  calculateBoxTileDistances();
 
   //Updates minGoalDistance
-  goalPositions.clear();
-  for(POSITION p = 0; p < this->mapLenX * this->mapLenY; p++){
+  std::vector<POSITION> goalPositions;
+  for(POSITION p = 0; p < this->mapLenTotal; p++){
     if(this->isGoal[p])
       goalPositions.push_back(p);
   }
 
-  for(POSITION p = 0; p < this->mapLenX * this->mapLenY; p++){
+  for(POSITION p = 0; p < this->mapLenTotal; p++){
     this->minGoalDistance[p] = SHRT_MAX;
     for(POSITION gp : goalPositions)
-      if(getTileDistance(p, gp) < this->minGoalDistance[p])
-        this->minGoalDistance[p] = getTileDistance(p, gp);
+      if(getBoxTileDistance(p, gp) < this->minGoalDistance[p])
+        this->minGoalDistance[p] = getBoxTileDistance(p, gp);
   }
 
   /*
@@ -288,6 +281,24 @@ Sokoban::Sokoban(FILE* inputMap){
     }
     printf("\n\n");
   }
+  printf("\nTunnel Macros:\n");
+  for(auto it : tunnelMacros){
+    printf("(%d %d) - (%d %d): ", it.first.player % this->mapLenX, it.first.player / this->mapLenX, it.first.box % this->mapLenX, it.first.box / this->mapLenX);
+    switch(it.second){
+      case UP:
+        printf("UP\n");
+        break;
+      case DOWN:
+        printf("DOWN\n");
+        break;
+      case LEFT:
+        printf("LEFT\n");
+        break;
+      case RIGHT:
+        printf("RIGHT\n");
+        break;
+    }
+  }
   exit(0);
   */
 
@@ -301,39 +312,12 @@ Sokoban::~Sokoban(){
   delete[] this->tileDistances;
   delete[] this->boxTileDistances;
 
-  delete[] this->mmMatrix;
-  delete[] this->staticmmMatrix;
-  delete[] this->goalAssigned;
-  delete[] this->boxAssigned;
-  delete[] this->couldntAssignBox;
-  delete[] this->couldntAssignGoal;
-  delete[] this->numberZeroesRow;
-  delete[] this->numberZeroesCol;
-  delete[] this->tickedRows;
-  delete[] this->tickedCols;
-
   delete[] this->treatWall;
 
   delete[] this->distBoxesPP;
   delete[] this->distBoxesNPP;
 }
 
-struct ComparePriorityAstar {
-    bool operator()(SOKOBAN_NODE* const& n1, SOKOBAN_NODE* const& n2)
-    {
-        if(n1->pathCost + n1->heuristica + n1->additionalF == n2->pathCost + n2->heuristica + n2->additionalF)
-          return n1->heuristica > n2->heuristica;
-        else
-          return n1->pathCost + n1->heuristica + n1->additionalF > n2->pathCost + n2->heuristica + n2->additionalF;
-    }
-};
-
-struct ComparePriorityGreedy {
-    bool operator()(SOKOBAN_NODE* const& n1, SOKOBAN_NODE* const& n2)
-    {
-        return n1->heuristica > n2->heuristica;
-    }
-};
 
 int Sokoban::fHeuristica(SOKOBAN_STATE &state){
   int result = 0;
@@ -351,7 +335,7 @@ int Sokoban::fHeuristica(SOKOBAN_STATE &state){
         d = d2;
     }
     border = bp + this->mapLenX;
-    if(border < this->mapLenX * this->mapLenY){
+    if(border < this->mapLenTotal){
       d2 = getTileDistance(state.playerPosition, border);
       if(d2 < d)
         d = d2;
@@ -375,259 +359,11 @@ int Sokoban::fHeuristica(SOKOBAN_STATE &state){
   for(POSITION bp : state.boxPositions)
     result = result + this->minGoalDistance[bp];
   return result;
-
-  //Minimum Matching assignment
-  int row = 0;
-  int minimum;
-  for(POSITION bp : state.boxPositions){
-    for(int i = 0; i < this->mapBoxQuant; i++){
-      this->mmMatrix[i + row] = getTileDistance(bp, goalPositions[i]);
-      this->staticmmMatrix[i + row] = this->mmMatrix[i + row];
-    }
-    row = row + this->mapBoxQuant;
-  }
-
-  //Row minimum subtraction
-  for(int i = 0; i < this->mapBoxQuant; i++){
-    minimum = mmMatrix[i * this->mapBoxQuant];
-    for(int j = 1; j < this->mapBoxQuant; j++){
-      if(mmMatrix[j + i * this->mapBoxQuant] < minimum)
-        minimum = mmMatrix[j + i * this->mapBoxQuant];
-    }
-    for(int j = 0; j < this->mapBoxQuant; j++)
-      mmMatrix[j + i * this->mapBoxQuant] = mmMatrix[j + i * this->mapBoxQuant] - minimum;
-  }
-
-  //Columm minimum subtraction
-  for(int j = 0; j < this->mapBoxQuant; j++){
-    minimum = mmMatrix[j];
-    for(int i = 1; i < this->mapBoxQuant; i++){
-      if(mmMatrix[j + i * this->mapBoxQuant] < minimum)
-        minimum = mmMatrix[j + i * this->mapBoxQuant];
-    }
-    for(int i = 0; i < this->mapBoxQuant; i++)
-      mmMatrix[j + i * this->mapBoxQuant] = mmMatrix[j + i * this->mapBoxQuant] - minimum;
-  }
-
-  bool foundAssing = false;
-
-  while(!foundAssing){
-    for(int i = 0; i < this->mapBoxQuant; i++){
-      numberZeroesRow[i] = 0;
-      numberZeroesCol[i] = 0;
-    }
-
-    for(int i = 0; i < this->mapBoxQuant; i++){
-      goalAssigned[i] = -1;
-      boxAssigned[i] = -1;
-      couldntAssignBox[i] = false;
-      couldntAssignGoal[i] = false;
-      for(int j = 0; j < this->mapBoxQuant; j++){
-        if(mmMatrix[i * this->mapBoxQuant + j] == 0){
-          numberZeroesRow[i]++;
-          numberZeroesCol[j]++;
-        }
-      }
-    }
-
-    bool stopAssingment = false;
-    while(!stopAssingment){
-      bool rowAsg;
-      int minimumRow = 0;
-      while(minimumRow < this->mapBoxQuant && (goalAssigned[minimumRow] != -1 || couldntAssignBox[minimumRow])){
-        minimumRow++;
-      }
-      for(int j = minimumRow + 1; j < this->mapBoxQuant; j++){
-        if(goalAssigned[j] == -1 && !couldntAssignBox[j] && numberZeroesRow[j] < numberZeroesRow[minimumRow])
-          minimumRow = j;
-      }
-
-      int minimumCol = 0;
-      while(minimumCol < this->mapBoxQuant && (boxAssigned[minimumCol] != -1 || couldntAssignGoal[minimumCol])){
-        minimumCol++;
-      }
-      for(int j = minimumCol + 1; j < this->mapBoxQuant; j++){
-        if(boxAssigned[j] == -1 && !couldntAssignGoal[j] && numberZeroesCol[j] < numberZeroesCol[minimumCol])
-          minimumCol = j;
-      }
-
-      if(minimumRow >= this->mapBoxQuant || (minimumCol < this->mapBoxQuant && numberZeroesCol[minimumCol] < numberZeroesRow[minimumRow])){
-        rowAsg = false;
-        minimum = minimumCol;
-      }
-      else{
-        rowAsg = true;
-        minimum = minimumRow;
-      }
-
-      if(rowAsg){
-        int col = 0;
-        int chosenCol = -1;
-        while(col < this->mapBoxQuant){
-          if(mmMatrix[minimum * this->mapBoxQuant + col] == 0){
-            bool taken = false;
-            for(int k = 0; k <  this->mapBoxQuant; k++)
-              if(goalAssigned[k] == col)
-                taken = true;
-            if(!taken && (chosenCol == -1 || numberZeroesCol[col] < numberZeroesCol[chosenCol]))
-              chosenCol = col;
-          }
-          col++;
-        }
-        if(chosenCol != -1){
-          goalAssigned[minimum] = chosenCol;
-          boxAssigned[chosenCol] = minimum;
-          for(int k = 0; k < this->mapBoxQuant; k++)
-            if(mmMatrix[chosenCol + k * this->mapBoxQuant] == 0)
-              numberZeroesRow[k]--;
-          for(int k = 0; k < this->mapBoxQuant; k++)
-            if(mmMatrix[minimum * this->mapBoxQuant + k] == 0)
-              numberZeroesCol[k]--;
-        }
-
-        if(goalAssigned[minimum] == -1)
-          couldntAssignBox[minimum] = true;
-      }
-      else{
-        int row = 0;
-        int chosenRow = -1;
-        while(row < this->mapBoxQuant){
-          if(mmMatrix[row * this->mapBoxQuant + minimum] == 0){
-            bool taken = false;
-            for(int k = 0; k <  this->mapBoxQuant; k++)
-              if(boxAssigned[k] == row)
-                taken = true;
-            if(!taken && (chosenRow == -1 || numberZeroesRow[row] < numberZeroesRow[chosenRow]))
-              chosenRow = row;
-          }
-          row++;
-        }
-        if(chosenRow != -1){
-          boxAssigned[minimum] = chosenRow;
-          goalAssigned[chosenRow] = minimum;
-          for(int k = 0; k < this->mapBoxQuant; k++)
-            if(mmMatrix[k + chosenRow * this->mapBoxQuant] == 0)
-              numberZeroesCol[k]--;
-          for(int k = 0; k < this->mapBoxQuant; k++)
-            if(mmMatrix[minimum + this->mapBoxQuant * k] == 0)
-              numberZeroesRow[k]--;
-        }
-
-        if(boxAssigned[minimum] == -1)
-          couldntAssignGoal[minimum] = true;
-      }
-
-      stopAssingment = true;
-      for(int k = 0; k < this->mapBoxQuant; k++){
-        if(!couldntAssignBox[k] && goalAssigned[k] == -1)
-          stopAssingment = false;
-      }
-    }
-
-    foundAssing = true;
-    for(int i = 0; i < this->mapBoxQuant; i++)
-      if(goalAssigned[i] == -1)
-        foundAssing = false;
-
-    if(!foundAssing){
-      for(int i = 0; i < this->mapBoxQuant; i++){
-        tickedRows[i] = (goalAssigned[i] == -1);
-        tickedCols[i] = false;
-      }
-
-      bool keepTicking = true;
-
-      while(keepTicking){
-        keepTicking = false;
-        for(int i = 0; i < this->mapBoxQuant; i++){
-          if(tickedRows[i]){
-            for(int j = 0; j < this->mapBoxQuant; j++)
-              if(this->mmMatrix[i * this->mapBoxQuant + j] == 0)
-                tickedCols[j] = true;
-          }
-        }
-
-        for(int i = 0; i < this->mapBoxQuant; i++){
-          if(tickedCols[i]){
-            for(int j = 0; j < this->mapBoxQuant; j++){
-              if(goalAssigned[j] == i && !tickedRows[j]){
-                keepTicking = true;
-                tickedRows[j] = true;
-              }
-            }
-          }
-        }
-      }
-
-      int theta = SHRT_MAX;
-      for(int i = 0; i < this->mapBoxQuant; i++){
-        if(tickedRows[i]){
-          for(int j = 0; j < this->mapBoxQuant; j++){
-            if(!tickedCols[j] && this->mmMatrix[i * this->mapBoxQuant + j] < theta)
-              theta = this->mmMatrix[i * this->mapBoxQuant + j];
-          }
-        }
-      }
-
-      int nTickRows = 0;
-      for(int i = 0; i < this->mapBoxQuant; i++)
-        if(tickedRows[i])
-          nTickRows++;
-      if(nTickRows == this->mapBoxQuant){
-        for(int i = 0; i < this->mapBoxQuant; i++){
-          goalAssigned[i] = -1;
-          boxAssigned[i] = -1;
-        }
-        forceAssing(0);
-        foundAssing = true;
-      }
-
-      for(int i = 0; i < this->mapBoxQuant; i++){
-        for(int j = 0; j < this->mapBoxQuant; j++){
-          if(tickedRows[i] && !tickedCols[j])
-            this->mmMatrix[i * this->mapBoxQuant + j] = this->mmMatrix[i * this->mapBoxQuant + j] - theta;
-          if(!tickedRows[i] && tickedCols[j])
-            this->mmMatrix[i * this->mapBoxQuant + j] = this->mmMatrix[i * this->mapBoxQuant + j] + theta;
-        }
-      }
-    }
-  }
-  for(int i = 0; i < this->mapBoxQuant; i++)
-    result = result + this->staticmmMatrix[i * this->mapBoxQuant + goalAssigned[i]];
-
-  return result;
-}
-
-bool Sokoban::forceAssing(int col){
-  if(col >= this->mapBoxQuant)
-    return true;
-
-  for(int i = 0; i < this->mapBoxQuant; i++){
-    if(this->mmMatrix[i * this->mapBoxQuant + col] == 0){
-      bool rowTaken = false;
-      for(int j = col-1; j >= 0; j--)
-        if(boxAssigned[j] == i)
-          rowTaken = true;
-
-      if(!rowTaken){
-        boxAssigned[col] = i;
-        goalAssigned[i] = col;
-        if(forceAssing(col+1))
-          return true;
-        else{
-          boxAssigned[col] = -1;
-          goalAssigned[i] = -1;
-        }
-      }
-    }
-  }
-
-  return false;
 }
 
 SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*> &nodes, long long int expanded, long long int addedToOpen){
   SOKOBAN_SOLUTION sol;
-  sol.cost = n->pathCost;
+  sol.cost = n->info->pathCost;
   sol.expanded = expanded;
   sol.addedToOpen = addedToOpen;
 
@@ -643,46 +379,28 @@ SOKOBAN_SOLUTION Sokoban::extractPath(SOKOBAN_NODE* n, std::vector<SOKOBAN_NODE*
   }
 
   for(SOKOBAN_NODE* np : nodes){
-    if(np->state != nullptr)
-      delete np->state;
+    if(np->info != nullptr)
+      delete np->info;
 
     delete np;
   }
 
-  SOKOBAN_NODE* dummyNode = makeRootNode();
-  sol.heuristicaInicial = dummyNode->heuristica;
-  delete dummyNode->state;
-  delete dummyNode;
+  sol.initialHeuristic = -1;
 
   return sol;
 }
 
-SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, ALGO algo, int idastarFlimit, int ramLimit){
+SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, int ramLimit){
   auto tempoInicial = std::chrono::steady_clock::now();
 
   SOKOBAN_SOLUTION solution;
 
   this->lowMemory = lowMemory;
 
-  if(ramLimit >= 1 && ramLimit <= 98){
+  if(ramLimit >= 1 && ramLimit <= 98)
     this->ramLimit = ramLimit;
-  }
-
-  switch (algo) {
-    case ASTAR:
-      solution = solveAstar(verbose);
-      break;
-    case PEASTAR:
-      solution = solvePEAstar(verbose);
-      break;
-    case IDASTAR:
-      solution = solveIdAstar(verbose, idastarFlimit);
-      break;
-    case GREEDY:
-      solution = solveGBFS(verbose);
-      break;
-  }
-
+  
+  solution = solvePEAstar(verbose);
 
   auto tempoFinal = std::chrono::steady_clock::now();
   long long int tempoTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(tempoFinal - tempoInicial).count();
@@ -691,265 +409,37 @@ SOKOBAN_SOLUTION Sokoban::solve(bool verbose, bool lowMemory, ALGO algo, int ida
   return solution;
 }
 
-std::pair<int, std::vector<ACTION>> Sokoban::recursiveSearchIdastar(SOKOBAN_NODE* node, int fLimit, int *expanded, bool *noneSol, std::unordered_set<SOKOBAN_STATE> &transpositionTable){
-  std::pair<int, std::vector<ACTION>> solution;
-  std::vector<ACTION> caminho;
-
-  if(node->pathCost + node->heuristica > fLimit)
-    return std::make_pair(node->pathCost + node->heuristica, caminho);
-
-  if(isGoalState(*(node->state))){
-    *noneSol = false;
-    return std::make_pair(fLimit, caminho);
-  }
-
-  *expanded = *expanded + 1;
-  int nextLimit = SHRT_MAX;
-  for(std::pair<ACTION, SOKOBAN_STATE> suc : getSucc(*(node->state))){
-
-    if(!movedBox(*(node->state), node->action) && suc.first == opposite(node->action))
-      continue;
-
-    if(transpositionTable.find(suc.second) != transpositionTable.end())
-      continue;
-
-    SOKOBAN_NODE* nl = makeNode(node, suc.first, suc.second);
-    if(nl->heuristica != SHRT_MAX){
-      transpositionTable.insert(*(nl->state));
-
-      solution = recursiveSearchIdastar(nl, fLimit, expanded, noneSol, transpositionTable);
-
-      transpositionTable.erase(*(nl->state));
-      delete nl->state;
-      delete nl;
-
-      if(!(*noneSol)){
-        caminho = solution.second;
-        caminho.push_back(suc.first);
-        return std::make_pair(solution.first, caminho);
-      }
-      if(solution.first < nextLimit)
-        nextLimit = solution.first;
-    }
-    else{
-      delete nl->state;
-      delete nl;
-    }
-  }
-  return std::make_pair(nextLimit, caminho);
-}
-
-SOKOBAN_SOLUTION Sokoban::solveIdAstar(bool verbose, int idastarFlimit){
-  std::pair<int, std::vector<ACTION>> solution;
-
-  SOKOBAN_NODE* root = makeRootNode();
-
-  int fLimit = idastarFlimit <= 0 ? root->heuristica : idastarFlimit;
-  int heuristicaInicial = fLimit;
-
-  int expanded = 0;
-  bool noneSol = true;
-
-  std::unordered_set<SOKOBAN_STATE> transpositionTable;
+void Sokoban::shrinkOpen(PriQueue* open, StateSet* closed, std::vector<SOKOBAN_NODE*>& nodesToDelete, const bool verbose){
+  const int before = (int) open->size();
 
   if(verbose)
-    printf("New F-Limit: %d\n", fLimit);
+    printf("Shrink Open Before: %d\n", before);
+  SOKOBAN_NODE** tempN = (SOKOBAN_NODE**) malloc(sizeof(SOKOBAN_NODE*) * (int) open->size());
+    
+  int curN = 0;
+  while(!open->empty()){
+	  SOKOBAN_NODE* n = open->deleteMin();
 
-  while(fLimit != SHRT_MAX){
-    auto iterInit = std::chrono::steady_clock::now();
-
-    solution = recursiveSearchIdastar(root, fLimit, &expanded, &noneSol, transpositionTable);
-    if(!noneSol){
-      delete root->state;
-      delete root;
-      SOKOBAN_SOLUTION sol;
-      sol.heuristicaInicial = heuristicaInicial;
-      sol.cost = solution.first;
-      sol.expanded = expanded;
-      sol.path = solution.second;
-      for(int i = 0; i < (int) sol.path.size()/2; i++){
-        ACTION auxA = sol.path[i];
-        sol.path[i] = sol.path[sol.path.size()-1-i];
-        sol.path[sol.path.size()-1-i] = auxA;
-      }
-      return sol;
-    }
-    else
-      fLimit = solution.first;
-
-    auto iterEnd = std::chrono::steady_clock::now();
-    int iterTotal = (int) std::chrono::duration_cast<std::chrono::seconds>(iterEnd - iterInit).count();
-
-    if(verbose)
-      printf("New F-Limit: %d (%02d:%02d:%02d)\n", fLimit, iterTotal / 3600, (iterTotal % 3600) / 60, iterTotal % 60);
-
-  }
-
-  delete root->state;
-  delete root;
-
-  SOKOBAN_SOLUTION nosol;
-  nosol.path.clear();
-  nosol.cost = -1;
-  nosol.expanded = expanded;
-  nosol.heuristicaInicial = heuristicaInicial;
-  nosol.addedToOpen = 0;
-  nosol.timeMilis = 0;
-  return nosol;
-}
-
-SOKOBAN_SOLUTION Sokoban::solveAstar(bool verbose){
-  auto expandTestInicial = std::chrono::steady_clock::now();
-
-  long long int expanded = 0;
-  long long int addedToOpen = 0;
-  std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityAstar> open;
-
-  std::unordered_set<SOKOBAN_STATE> closed;
-
-  closed.reserve(6000000);
-  closed.max_load_factor(0.9);
-
-  std::vector<SOKOBAN_NODE*> nodes;
-
-  SOKOBAN_NODE* initialNode = makeRootNode();
-  nodes.push_back(initialNode);
-
-  int heuristicaInicial = initialNode->heuristica;
-
-  //Verbose stuff
-  int lowestH = SHRT_MAX;
-  int highestF = 0;
-  int stateExpandDelay = 1000;
-
-  MEMORYSTATUSEX statex;
-  statex.dwLength = sizeof (statex);
-
-  if(initialNode->heuristica < SHRT_MAX){
-    open.push(initialNode);
-    addedToOpen++;
-  }
-
-  while(!open.empty()){
-    SOKOBAN_NODE* n = open.top();
-    open.pop();
-
-    if(verbose && n->heuristica < lowestH){
-      lowestH = n->heuristica;
-      printf("Lowest Heuristic: %d\n", lowestH);
-    }
-    if(verbose && n->pathCost + n->heuristica > highestF){
-      highestF = n->pathCost + n->heuristica;
-      printf("Highest F-Value: %d\n", highestF);
-    }
-
-    if(closed.find(*(n->state)) == closed.end()){
-      closed.insert(*(n->state));
-
-      if(isGoalState(*(n->state)))
-        return extractPath(n, nodes, expanded, addedToOpen);
-
-      expanded++;
-
-      GlobalMemoryStatusEx (&statex);
-
-      if(statex.dwMemoryLoad >= static_cast<unsigned int>(this->ramLimit)){
-        if(verbose){
-          printf("Out of memory! Terminating...\n");
-        }
-        
-        for(SOKOBAN_NODE* n : nodes){
-          delete n->state;
-          delete n;
-        }
-
-        SOKOBAN_SOLUTION nosol;
-        nosol.path.clear();
-        nosol.cost = NO_RAM;
-        nosol.expanded = expanded;
-        nosol.heuristicaInicial = heuristicaInicial;
-        nosol.addedToOpen = addedToOpen;
-        nosol.timeMilis = 0;
-
-        return nosol;
-      }
-
-      if(verbose && expanded % stateExpandDelay == 0){
-        auto expandTestFinal = std::chrono::steady_clock::now();
-        long long int expandTestTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(expandTestFinal - expandTestInicial).count();
-        printf("Expanded: %lld States (Mem: %ld / %d)\n", expanded, statex.dwMemoryLoad, this->ramLimit);
-        if(expandTestTotal < 3000)
-          stateExpandDelay = stateExpandDelay*10;
-        if(expandTestTotal > 30000)
-          stateExpandDelay = stateExpandDelay/2;
-        expandTestInicial = expandTestFinal;
-      }
-
-      for(std::pair<ACTION, SOKOBAN_STATE> s : getSucc(*(n->state))){
-
-        if(closed.find(s.second) == closed.end()){
-          if(this->lowMemory && !movedBox(s.second, s.first) && !checkMoveCloser(*(n->state), s.first)){
-            closed.insert(s.second);
-          }
-          else{
-            SOKOBAN_NODE* nl = makeNode(n, s.first, s.second);
-            if(nl->heuristica < SHRT_MAX){
-              nodes.push_back(nl);
-              open.push(nl);
-              addedToOpen++;
-            }
-            else{
-              delete nl->state;
-              delete nl;
-            }
-          }
-        }
-      }
-
-      delete n->state;
-      n->state = nullptr;
-    }
-
-  }
-
-  for(SOKOBAN_NODE* n : nodes){
-    delete n->state;
-    delete n;
-  }
-
-  SOKOBAN_SOLUTION nosol;
-  nosol.path.clear();
-  nosol.cost = NO_SOLUTION;
-  nosol.expanded = expanded;
-  nosol.heuristicaInicial = heuristicaInicial;
-  nosol.addedToOpen = addedToOpen;
-  nosol.timeMilis = 0;
-
-  if(!open.empty())
-    nosol.cost = NO_RAM;
-
-  return nosol;
-}
-
-/*
-void deleteNodes(std::vector<SOKOBAN_NODE*>& nodes, std::unordered_set<SOKOBAN_NODE*>& toDelete){
-  const int nSize = (int) nodes.size();
-  int deletedCount = 0;
-  for(int i = 0; i < nSize; i++){
-    if(toDelete.find(nodes[i]) != toDelete.end()){
-      deletedCount++;
-      if(nodes[i]->parent != nullptr)
-        nodes[i]->parent->nSuccs = nodes[i]->parent->nSuccs - 1;
-      delete nodes[i]->state;
-      delete nodes[i];
-    }
+	  if(!closed->isInSet(n->info->state)){
+	    tempN[curN] = n;
+	    curN++;
+	  }
     else{
-      nodes[i - deletedCount] = nodes[i];
+      if(n->nUseCount == 0){
+        nodesToDelete.push_back(n);
+      }
     }
   }
-  nodes.erase(nodes.begin() + nodes.size() - deletedCount, nodes.begin() + nodes.size());
+
+  for(int i = 0; i < curN; i++)
+	  open->push(tempN[i], (tempN[i]->info->pathCost + tempN[i]->info->heuristic + tempN[i]->info->additionalF) * (10000) + tempN[i]->info->heuristic);
+
+  free(tempN);
+  const int after = (int) open->size();
+
+  if(verbose)
+    printf("Shrink Open After: %d (%.2f%% nodes deleted)\n", after, 100.0 - (100.0 * after) / before);
 }
-*/
 
 SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
   auto expandTestInicial = std::chrono::steady_clock::now();
@@ -957,70 +447,81 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
   long long int expanded = 0;
   long long int addedToOpen = 0;
   long long int prevOpenSize = 1;
-  std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityAstar> open;
 
-  std::unordered_set<SOKOBAN_STATE> closed;
+  int closedShrinkCount = 0;
+  long long int closedSizeOnShrink = 0;
+  bool closedShrinkStop = false;
+  
+  PriQueue open(8);
+  StateSet closed(BoxPositionSet::STATE_BOX_QUANT);
 
   const int NODES_TO_DELETE_SIZE = 200000;
   std::vector<SOKOBAN_NODE*> nodesToDelete;
   nodesToDelete.reserve((int) (NODES_TO_DELETE_SIZE));
 
-  closed.reserve(10000000);
-  closed.max_load_factor(0.9);
-
   std::vector<SOKOBAN_NODE*> nodes;
-  NodeManager nodeManager(NODES_TO_DELETE_SIZE, 524288);
+  NodeManager nodeManager(524288);
 
   SOKOBAN_NODE* initialNode = makeRootNode();
 
-  int heuristicaInicial = initialNode->heuristica;
+  int initialHeuristic = initialNode->info->heuristic;
 
   //Verbose stuff
   int lowestH = SHRT_MAX;
   int highestF = 0;
   int stateExpandDelay = 1000;
-  long long int repeatedNodes = 0;
 
   MEMORYSTATUSEX statex;
   statex.dwLength = sizeof (statex);
+  GlobalMemoryStatusEx(&statex);
+  const DWORD ClosedShrinkLoad = (((this->ramLimit - statex.dwMemoryLoad) * 17) / 30) + statex.dwMemoryLoad;
+  if(verbose)
+    printf("ClosedShrikLoad: %d\n", (int) ClosedShrinkLoad);
 
-  if(initialNode->heuristica < SHRT_MAX){
-    open.push(initialNode);
+  if(initialNode->info->heuristic < SHRT_MAX){
+    open.push(initialNode, initialNode->info->pathCost + initialNode->info->heuristic + initialNode->info->additionalF);
     addedToOpen++;
   }
 
-  while(!open.empty()){
-    SOKOBAN_NODE* n = open.top();
-    open.pop();
+  SOKOBAN_STATE succVec[4];
+  bool succVecValid[4];
 
-    if(verbose && n->heuristica < lowestH){
-      lowestH = n->heuristica;
+  while(!open.empty()){
+    SOKOBAN_NODE* n = open.deleteMin();
+
+    if(verbose && n->info->heuristic < lowestH){
+      lowestH = n->info->heuristic;
       printf("Lowest Heuristic: %d\n", lowestH);
     }
-    if(verbose && n->pathCost + n->heuristica > highestF){
-      highestF = n->pathCost + n->heuristica;
+    if(verbose && n->info->pathCost + n->info->heuristic > highestF){
+      highestF = n->info->pathCost + n->info->heuristic;
       printf("Highest F-Value: %d (BF: %.2f)\n", highestF, ((float) open.size() / prevOpenSize));
       prevOpenSize = open.size();
     }
 
-    bool keepNode = false;
-    if(closed.find(*(n->state)) == closed.end()){
-      closed.insert(*(n->state));
+    if(!closed.isInSet(n->info->state)){
+      closed.insert(n->info->state);
 
-      if(isGoalState(*(n->state)))
+      if(isGoalState(n->info->state)){
+        /*
+        if(initialNode->info != nullptr){
+          delete initialNode->info;
+        }
+        delete initialNode;
+        */
         return extractPath(n, nodes, expanded, addedToOpen);
+      }
 
       expanded++;
 
       GlobalMemoryStatusEx(&statex);
 
       if(statex.dwMemoryLoad >= static_cast<unsigned int>(this->ramLimit)){
-        if(verbose){
+        if(verbose)
           printf("Out of memory! Terminating...\n");
-        }
 
-        if(initialNode->state != nullptr){
-          delete initialNode->state;
+        if(initialNode->info != nullptr){
+          delete initialNode->info;
           delete initialNode;
         }
 
@@ -1028,44 +529,89 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
         nosol.path.clear();
         nosol.cost = NO_RAM;
         nosol.expanded = expanded;
-        nosol.heuristicaInicial = heuristicaInicial;
+        nosol.initialHeuristic = initialHeuristic;
         nosol.addedToOpen = addedToOpen;
         nosol.timeMilis = 0;
 
         return nosol;
       }
 
-      if(verbose && expanded % stateExpandDelay == 0){
+      if(expanded % stateExpandDelay == 0){
+        
         auto expandTestFinal = std::chrono::steady_clock::now();
         long long int expandTestTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(expandTestFinal - expandTestInicial).count();
-        printf("Expanded: %lld States (Mem: %ld / %d) ", expanded, statex.dwMemoryLoad, this->ramLimit);
-        printf("Open: %lld, Nodes: %ld, Closed: %lld, Repeated: %lld\n", (long long int) open.size(), nodeManager.size(), (long long int) closed.size(), repeatedNodes);
+        if(verbose){
+          printf("Expanded: %lld States (Mem: %ld / %d) ", expanded, statex.dwMemoryLoad, this->ramLimit);
+          printf("Open: %lld, Nodes: %ld, Deleted: %ld, Closed: %lld\n", (long long int) open.size(), nodeManager.size(), nodeManager.deletedQuant(), (long long int) closed.size());
+        }
         if(expandTestTotal < 3000)
           stateExpandDelay = stateExpandDelay*10;
         if(expandTestTotal > 30000)
           stateExpandDelay = stateExpandDelay/2;
-        expandTestInicial = expandTestFinal;
+
+        if(closedShrinkCount < 1 && statex.dwMemoryLoad >= ClosedShrinkLoad){
+          closedShrinkCount++;
+          closedSizeOnShrink = (closed.size() * 96) / 100;
+          this->shrinkOpen(&open, &closed, nodesToDelete, verbose);
+          closed.shrink(gameMap, this->mapLenX, this->mapLenY, verbose);
+          if(verbose)
+            printf("Next ClosedSizeShrink: %lld\n", closedSizeOnShrink);
+        }
+        else if(closedShrinkCount > 0 && closed.size() >= closedSizeOnShrink && !closedShrinkStop){
+          closedShrinkCount++;
+          closedSizeOnShrink = (closed.size() * 96) / 100;
+          this->shrinkOpen(&open, &closed, nodesToDelete, verbose);
+          
+          long long int before = closed.size();
+          closed.shrink(gameMap, this->mapLenX, this->mapLenY, verbose);
+          long long int after = closed.size();
+          if((before - after) * 10 < before){
+            closedShrinkStop = true;
+            if(verbose)
+              printf("Last shrink...\n");
+          }
+          else if(verbose)
+            printf("Next ClosedSizeShrink: %lld\n", closedSizeOnShrink);
+        }
+
+        expandTestInicial = std::chrono::steady_clock::now();
       }
 
       int minAddF = 9999;
-      for(std::pair<ACTION, SOKOBAN_STATE> s : getSucc(*(n->state))){
-        if(closed.find(s.second) == closed.end()){
-          if(this->lowMemory && !movedBox(s.second, s.first) && !checkMoveCloser(*(n->state), s.first)){
-            closed.insert(s.second);
-          }
-          else{const int fH = fHeuristica(s.second);
 
+      bool tunnelMacro = false;
+      ACTION tunnelMacroAction = UP;
+      if(n != initialNode){
+        std::vector<POSITION> tmBoxPositions = {static_cast<POSITION>(n->info->state.playerPosition - this->mapLenX), static_cast<POSITION>(n->info->state.playerPosition + this->mapLenX),  static_cast<POSITION>(n->info->state.playerPosition - 1),  static_cast<POSITION>(n->info->state.playerPosition + 1)};
+        for(int i = 0; i < 4; i++){
+          if(n->info->state.boxPositions.find(tmBoxPositions[i]) != n->info->state.boxPositions.end()){
+            auto itTM = this->tunnelMacros.find(TUNNEL_MACRO{n->info->state.playerPosition, tmBoxPositions[i]});
+            if(itTM != this->tunnelMacros.end()){
+              tunnelMacro = true;
+              tunnelMacroAction = itTM->second;
+            }
+          }
+        }
+      }
+
+      getSucc(n->info->state, succVec, succVecValid);
+      for(int i = 0; i < 4; i++){
+        if(succVecValid[i] && !closed.isInSet(succVec[i]) && (!tunnelMacro || tunnelMacroAction == static_cast<ACTION>(i))){
+          if(this->lowMemory && !movedBox(succVec[i], static_cast<ACTION>(i)) && !checkMoveCloser(n->info->state, static_cast<ACTION>(i))){
+            closed.insert(succVec[i]);
+          }
+          else{
+            const int fH = fHeuristica(succVec[i]);
             if(fH < SHRT_MAX){
-              if(n->pathCost + 1 + fH >= n->pathCost + n->heuristica + n->additionalF){
-              
-                if(n->pathCost + 1 + fH == n->pathCost + n->heuristica + n->additionalF){
-                  SOKOBAN_NODE* nl = nodeManager.makeNode(n, s.first, s.second, fH);
-                  open.push(nl);
+              if(n->info->pathCost + 1 + fH >= n->info->pathCost + n->info->heuristic + n->info->additionalF){
+                if(n->info->pathCost + 1 + fH == n->info->pathCost + n->info->heuristic + n->info->additionalF){
+                  SOKOBAN_NODE* nl = nodeManager.makeNode(n, static_cast<ACTION>(i), succVec[i], fH);
+                  open.push(nl, (nl->info->pathCost + nl->info->heuristic + nl->info->additionalF) * (10000) + nl->info->heuristic);
                   addedToOpen++;
                 }
                 else{
-                  if(n->pathCost + 1 + fH < n->pathCost + n->heuristica + n->additionalF + minAddF){
-                    minAddF = (n->pathCost + 1 + fH) - n->pathCost - n->heuristica - n->additionalF;
+                  if(n->info->pathCost + 1 + fH < n->info->pathCost + n->info->heuristic + n->info->additionalF + minAddF){
+                    minAddF = (n->info->pathCost + 1 + fH) - n->info->pathCost - n->info->heuristic - n->info->additionalF;
                   }
                 }
               }
@@ -1075,29 +621,29 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
       }
 
       if(minAddF < 9999){
-        keepNode = true;
-        n->additionalF = n->additionalF + minAddF;
-        open.push(n);
-        closed.erase(*(n->state));
+        n->info->additionalF = n->info->additionalF + minAddF;
+        open.push(n, (n->info->pathCost + n->info->heuristic + n->info->additionalF) * (10000) + n->info->heuristic);
+        closed.erase(n->info->state);
         addedToOpen++;
       }
       else{
-        delete n->state;
-        n->state = nullptr;
+        delete n->info;
+        n->info = nullptr;
       }
     }
     
-    if(n->nSuccs == 0 && !keepNode){
+    if(n->nUseCount == 0){
       nodesToDelete.push_back(n);
-      if(nodesToDelete.size() == NODES_TO_DELETE_SIZE){
+      if(nodesToDelete.size() >= NODES_TO_DELETE_SIZE){
         nodeManager.deleteNodes(nodesToDelete);
+        nodesToDelete.clear();
+        nodesToDelete.reserve(NODES_TO_DELETE_SIZE);
       }
-      repeatedNodes++;
     }
   }
 
-  if(initialNode->state != nullptr){
-    delete initialNode->state;
+  if(initialNode->info != nullptr){
+    delete initialNode->info;
     delete initialNode;
   }
 
@@ -1105,274 +651,114 @@ SOKOBAN_SOLUTION Sokoban::solvePEAstar(bool verbose){
   nosol.path.clear();
   nosol.cost = NO_SOLUTION;
   nosol.expanded = expanded;
-  nosol.heuristicaInicial = heuristicaInicial;
+  nosol.initialHeuristic = initialHeuristic;
   nosol.addedToOpen = addedToOpen;
   nosol.timeMilis = 0;
 
   return nosol;
 }
 
-SOKOBAN_SOLUTION Sokoban::solveGBFS(bool verbose){
-  auto expandTestInicial = std::chrono::steady_clock::now();
-
-  long long int expanded = 0;
-  long long int addedToOpen = 0;
-  std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityGreedy> open;
-
-  std::unordered_set<SOKOBAN_STATE> closed;
-  closed.reserve(6000000);
-  closed.max_load_factor(0.9);
-
-  std::vector<SOKOBAN_NODE*> nodes;
-
-  SOKOBAN_NODE* initialNode = makeRootNode();
-  nodes.push_back(initialNode);
-
-  int heuristicaInicial = initialNode->heuristica;
-
-  //Verbose stuff
-  int lowestH = SHRT_MAX;
-  int highestF = 0;
-  int stateExpandDelay = 1000;
-
-  MEMORYSTATUSEX statex;
-  statex.dwLength = sizeof (statex);
-
-  if(initialNode->heuristica < SHRT_MAX){
-    open.push(initialNode);
-    addedToOpen++;
-  }
-
-  while(!open.empty()){
-    SOKOBAN_NODE* n = open.top();
-    open.pop();
-
-    if(verbose && n->heuristica < lowestH){
-      lowestH = n->heuristica;
-      printf("Lowest Heuristic: %d\n", lowestH);
-    }
-    if(verbose && n->pathCost + n->heuristica > highestF){
-      highestF = n->pathCost + n->heuristica;
-      printf("Highest F-Value: %d\n", highestF);
-    }
-
-    if(closed.find(*(n->state)) == closed.end()){
-      closed.insert(*(n->state));
-
-      if(isGoalState(*(n->state)))
-        return extractPath(n, nodes, expanded, addedToOpen);
-
-      expanded++;
-
-      GlobalMemoryStatusEx (&statex);
-
-      if(statex.dwMemoryLoad >= static_cast<unsigned int>(this->ramLimit)){
-        if(verbose){
-          printf("Out of memory! Terminating...\n");
-        }
-
-        for(SOKOBAN_NODE* n : nodes){
-          delete n->state;
-          delete n;
-        }
-
-        SOKOBAN_SOLUTION nosol;
-        nosol.path.clear();
-        nosol.cost = NO_RAM;
-        nosol.expanded = expanded;
-        nosol.heuristicaInicial = heuristicaInicial;
-        nosol.addedToOpen = addedToOpen;
-        nosol.timeMilis = 0;
-
-        return nosol;
-      }
-
-      if(verbose && expanded % stateExpandDelay == 0){
-        auto expandTestFinal = std::chrono::steady_clock::now();
-        long long int expandTestTotal = (long long int) std::chrono::duration_cast<std::chrono::milliseconds>(expandTestFinal - expandTestInicial).count();
-        printf("Expanded: %lld States (Mem: %ld / %d)\n", expanded, statex.dwMemoryLoad, this->ramLimit);
-        if(expandTestTotal < 3000)
-          stateExpandDelay = stateExpandDelay*10;
-        if(expandTestTotal > 30000)
-          stateExpandDelay = stateExpandDelay/2;
-        expandTestInicial = expandTestFinal;
-      }
-
-      for(std::pair<ACTION, SOKOBAN_STATE> s : getSucc(*(n->state))){
-        if(closed.find(s.second) == closed.end()){
-          SOKOBAN_NODE* nl = makeNode(n, s.first, s.second);
-          if(nl->heuristica < SHRT_MAX){
-            nodes.push_back(nl);
-            open.push(nl);
-            addedToOpen++;
-          }
-          else{
-            delete nl->state;
-            delete nl;
-          }
-        }
-      }
-
-      delete n->state;
-      n->state = nullptr;
-    }
-  }
-
-  for(SOKOBAN_NODE* n : nodes){
-    delete n->state;
-    delete n;
-  }
-
-  SOKOBAN_SOLUTION nosol;
-  nosol.path.clear();
-  nosol.cost = NO_SOLUTION;
-  nosol.expanded = expanded;
-  nosol.heuristicaInicial = heuristicaInicial;
-  nosol.addedToOpen = addedToOpen;
-  nosol.timeMilis = 0;
-
-  if(!open.empty())
-    nosol.cost = NO_RAM;
-
-  return nosol;
-}
-
-std::vector<std::pair<ACTION, SOKOBAN_STATE>> Sokoban::getSucc(SOKOBAN_STATE &state){
-  std::vector<std::pair<ACTION, SOKOBAN_STATE>> sucs;
-  std::pair<ACTION, SOKOBAN_STATE> suc;
+void Sokoban::getSucc(SOKOBAN_STATE& state, SOKOBAN_STATE *succs, bool *valids){
   POSITION p;
-  SOKOBAN_STATE s;
 
+  for(int i = 0; i < 4; i++)
+    valids[i] = false;
+
+  //UP
   p = state.playerPosition - this->mapLenX;
-  if(p >= 0 && gameMap[p] != WALL){
-    auto bp = state.boxPositions.find(p);
-    if(bp == state.boxPositions.end()){
-      s.boxPositions = state.boxPositions;
-      s.playerPosition = p;
-      suc.first = UP;
-      suc.second = s;
-      sucs.push_back(suc);
+  if(gameMap[p] != WALL){
+    if(state.boxPositions.find(p) == state.boxPositions.end()){
+      succs[0].boxPositions = state.boxPositions;
+      succs[0].playerPosition = p;
+      valids[0] = true;
     }
     else{
       p = p - this->mapLenX;
-      if(p >= 0 && gameMap[p] != WALL){
-        if(state.boxPositions.find(p) == state.boxPositions.end() && !this->isDeadEnd[p]){
-          p = p + this->mapLenX;
-          s.boxPositions = state.boxPositions;
-          s.boxPositions.erase(s.boxPositions.find(p));
-          s.playerPosition = p;
-          p = p - this->mapLenX;
-          s.boxPositions.insert(p);
-          suc.first = UP;
-          suc.second = s;
+      if(gameMap[p] != WALL && !this->isDeadEnd[p] && state.boxPositions.find(p) == state.boxPositions.end()){
+        p = p + this->mapLenX;
+        succs[0].boxPositions = state.boxPositions;
+        succs[0].boxPositions.replace(p, p - this->mapLenX);
+        succs[0].playerPosition = p;
+        p = p - this->mapLenX;
 
-          if(!checkFrozen(suc.second, p))
-            sucs.push_back(suc);
+        if(!checkFrozen(succs[0], p)){
+          valids[0] = true;
         }
       }
     }
   }
 
+  //DOWN
   p = state.playerPosition + this->mapLenX;
-  if(p < this->mapLenX*this->mapLenY && gameMap[p] != WALL){
-    auto bp = state.boxPositions.find(p);
-    if(bp == state.boxPositions.end()){
-      s.boxPositions = state.boxPositions;
-      s.playerPosition = p;
-      suc.first = DOWN;
-      suc.second = s;
-      sucs.push_back(suc);
+  if(gameMap[p] != WALL){
+    if(state.boxPositions.find(p) == state.boxPositions.end()){
+      succs[1].boxPositions = state.boxPositions;
+      succs[1].playerPosition = p;
+      valids[1] = true;
     }
     else{
       p = p + this->mapLenX;
-      if(p < this->mapLenX*this->mapLenY && gameMap[p] != WALL){
-        if(state.boxPositions.find(p) == state.boxPositions.end() && !this->isDeadEnd[p]){
-          p = p - this->mapLenX;
-          s.boxPositions = state.boxPositions;
-          s.boxPositions.erase(s.boxPositions.find(p));
-          s.playerPosition = p;
-          p = p + this->mapLenX;
-          s.boxPositions.insert(p);
-          suc.first = DOWN;
-          suc.second = s;
+      if(gameMap[p] != WALL && !this->isDeadEnd[p] && state.boxPositions.find(p) == state.boxPositions.end()){  
+        p = p - this->mapLenX;
+        succs[1].boxPositions = state.boxPositions;
+        succs[1].boxPositions.replace(p, p + this->mapLenX);
+        succs[1].playerPosition = p;
+        p = p + this->mapLenX;
 
-          if(!checkFrozen(suc.second, p))
-            sucs.push_back(suc);
+        if(!checkFrozen(succs[1], p)){
+          valids[1] = true;
         }
       }
     }
   }
 
-
-  if(state.playerPosition % this->mapLenX != 0){
-    p = state.playerPosition - 1;
-    if(gameMap[p] != WALL){
-      auto bp = state.boxPositions.find(p);
-      if(bp == state.boxPositions.end()){
-        s.boxPositions = state.boxPositions;
-        s.playerPosition = p;
-        suc.first = LEFT;
-        suc.second = s;
-        sucs.push_back(suc);
-      }
-      else{
-        if(p % this->mapLenX != 0){
-          p--;
-          if(gameMap[p] != WALL){
-            if(state.boxPositions.find(p) == state.boxPositions.end() && !this->isDeadEnd[p]){
-              p++;
-              s.boxPositions = state.boxPositions;
-              s.boxPositions.erase(s.boxPositions.find(p));
-              s.playerPosition = p;
-              p--;
-              s.boxPositions.insert(p);
-              suc.first = LEFT;
-              suc.second = s;
-
-              if(!checkFrozen(suc.second, p))
-                sucs.push_back(suc);
-            }
-          }
+  //LEFT
+  p = state.playerPosition - 1;
+  if(gameMap[p] != WALL){
+    if(state.boxPositions.find(p) == state.boxPositions.end()){
+      succs[2].boxPositions = state.boxPositions;
+      succs[2].playerPosition = p;
+      valids[2] = true;
+    }
+    else{
+      p--;
+      if(gameMap[p] != WALL && !this->isDeadEnd[p] && state.boxPositions.find(p) == state.boxPositions.end()){
+        p++;
+        succs[2].boxPositions = state.boxPositions;
+        succs[2].boxPositions.replace(p, p - 1);
+        succs[2].playerPosition = p;
+        p--;
+        
+        if(!checkFrozen(succs[2], p)){
+          valids[2] = true;
         }
       }
     }
   }
 
-  if((state.playerPosition+1) % this->mapLenX != 0){
-    p = state.playerPosition + 1;
-    if(gameMap[p] != WALL){
-      auto bp = state.boxPositions.find(p);
-      if(bp == state.boxPositions.end()){
-        s.boxPositions = state.boxPositions;
-        s.playerPosition = p;
-        suc.first = RIGHT;
-        suc.second = s;
-        sucs.push_back(suc);
-      }
-      else{
-        if((p+1) % this->mapLenX != 0){
-          p++;
-          if(gameMap[p] != WALL){
-            if(state.boxPositions.find(p) == state.boxPositions.end() && !this->isDeadEnd[p]){
-              p--;
-              s.boxPositions = state.boxPositions;
-              s.boxPositions.erase(s.boxPositions.find(p));
-              s.playerPosition = p;
-              p++;
-              s.boxPositions.insert(p);
-              suc.first = RIGHT;
-              suc.second = s;
-
-              if(!checkFrozen(suc.second, p))
-                sucs.push_back(suc);
-            }
-          }
+  //RIGHT
+  p = state.playerPosition + 1;
+  if(gameMap[p] != WALL){
+    if(state.boxPositions.find(p) == state.boxPositions.end()){
+      succs[3].boxPositions = state.boxPositions;
+      succs[3].playerPosition = p;
+      valids[3] = true;
+    }
+    else{
+      p++;
+      if(gameMap[p] != WALL && !this->isDeadEnd[p] && state.boxPositions.find(p) == state.boxPositions.end()){
+        p--;
+        succs[3].boxPositions = state.boxPositions;
+        succs[3].boxPositions.replace(p, p + 1);
+        succs[3].playerPosition = p;
+        p++;
+        
+        if(!checkFrozen(succs[3], p)){
+          valids[3] = true;
         }
       }
     }
   }
-
-  return sucs;
 }
 
 bool Sokoban::isGoalState(SOKOBAN_STATE &state){
@@ -1384,7 +770,7 @@ bool Sokoban::isGoalState(SOKOBAN_STATE &state){
 }
 
 SOKOBAN_NODE* Sokoban::makeRootNode(){
-  SOKOBAN_STATE* initialState = new SOKOBAN_STATE;
+  SOKOBAN_STATE initialState;
   POSITION p;
 
   for(int i = 0; i < this->mapLenY; i++){
@@ -1392,36 +778,22 @@ SOKOBAN_NODE* Sokoban::makeRootNode(){
       p = i*this->mapLenX + j;
 
       if(this->gameMap[p] == PLAYER || this->gameMap[p] == PLAYER_AND_GOAL)
-        initialState->playerPosition = p;
+        initialState.playerPosition = p;
 
       if(this->gameMap[p] == BOX || this->gameMap[p] == GOAL_AND_BOX)
-        initialState->boxPositions.insert(p);
+        initialState.boxPositions.insert(p);
     }
   }
 
   SOKOBAN_NODE* node = new SOKOBAN_NODE;
   node->parent = NULL;
   node->action = UP;
-  node->state = initialState;
-  node->heuristica = fHeuristica(*(node->state));
-  node->pathCost = 0;
-  node->additionalF = 0;
-  node->nSuccs = 0;
-  return node;
-}
-
-SOKOBAN_NODE* Sokoban::makeNode(SOKOBAN_NODE* prt, ACTION action, SOKOBAN_STATE &state){
-  SOKOBAN_NODE* node = new SOKOBAN_NODE;
-  node->parent = prt;
-  node->action = action;
-  node->state = new SOKOBAN_STATE;
-  *(node->state) = state;
-  node->heuristica = fHeuristica(state);
-  node->pathCost = node->parent->pathCost + 1;
-  node->additionalF = 0;
-
-  node->parent->nSuccs = node->parent->nSuccs + 1;
-  node->nSuccs = 0;
+  node->info = new NodeInfo;
+  node->info->state = initialState;
+  node->info->heuristic = fHeuristica(node->info->state);
+  node->info->pathCost = 0;
+  node->info->additionalF = 0;
+  node->nUseCount = 0;
   return node;
 }
 
@@ -1429,74 +801,59 @@ SOKOBAN_NODE* Sokoban::makeNodePreSearch(SOKOBAN_NODE* prt, ACTION action, SOKOB
   SOKOBAN_NODE* node = new SOKOBAN_NODE;
   node->parent = prt;
   node->action = action;
-  node->state = new SOKOBAN_STATE;
-  *(node->state) = state;
+  node->info = new NodeInfo;
+  node->info->state = state;
 
-  node->heuristica = 0;
+  node->info->heuristic = 0;
   for(POSITION bp : state.boxPositions)
-    node->heuristica = node->heuristica + getTileDistance(bp, goal);
+    node->info->heuristic = node->info->heuristic + getTileDistance(bp, goal);
 
-  node->pathCost = gValue;
+  node->info->pathCost = gValue;
   return node;
 }
 
 //Aux Functions
 bool Sokoban::checkFrozen(SOKOBAN_STATE &state, POSITION boxPosition){
-  for(int j = 0; j < this->mapLenX * this->mapLenY; j++)
+  for(int j = 0; j < this->mapLenTotal; j++)
     this->treatWall[j] = false;
 
   return isFrozen(state, boxPosition, false, false);
 }
 
 bool Sokoban::isFrozen(SOKOBAN_STATE &state, POSITION boxPosition, bool xFrozen, bool yFrozen){
-  POSITION p;
+  if(this->isGoal[boxPosition]) 
+    return false;
 
   if(!xFrozen){
-    if(boxPosition % this->mapLenX != 0){
-      p = boxPosition - 1;
-      if(this->gameMap[p] == WALL)
-        xFrozen = true;
-    }
-    if((boxPosition+1) % this->mapLenX != 0){
-      p = boxPosition + 1;
-      if(this->gameMap[p] == WALL)
-        xFrozen = true;
-    }
-    if((boxPosition % this->mapLenX == 0 || this->isDeadEnd[boxPosition - 1]) && ((boxPosition+1) % this->mapLenX == 0 || this->isDeadEnd[boxPosition + 1]))
+    if(this->gameMap[boxPosition - 1] == WALL || this->gameMap[boxPosition + 1] == WALL)
       xFrozen = true;
-    if(boxPosition % this->mapLenX != 0 && state.boxPositions.find(boxPosition-1) != state.boxPositions.end()){
+    else if(this->isDeadEnd[boxPosition - 1] && this->isDeadEnd[boxPosition + 1])
+      xFrozen = true;
+    if(state.boxPositions.find(boxPosition-1) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
       xFrozen = treatWall[boxPosition-1] || isFrozen(state, boxPosition-1, true, false);
     }
-    else if((boxPosition+1) % this->mapLenX != 0 && state.boxPositions.find(boxPosition+1) != state.boxPositions.end()){
+    else if(state.boxPositions.find(boxPosition+1) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
       xFrozen = treatWall[boxPosition+1] || isFrozen(state, boxPosition+1, true, false);
     }
   }
   if(!yFrozen){
-    if(boxPosition - this->mapLenX >= 0){
-      p = boxPosition - this->mapLenX;
-      if(this->gameMap[p] == WALL)
-        yFrozen = true;
-    }
-    if(boxPosition + this->mapLenX < this->mapLenX * this->mapLenY){
-      p = boxPosition + this->mapLenX;
-      if(this->gameMap[p] == WALL)
-        yFrozen = true;
-    }
-    if((boxPosition - this->mapLenX < 0 || this->isDeadEnd[boxPosition - this->mapLenX]) && (boxPosition + this->mapLenX >= this->mapLenX * this->mapLenY || this->isDeadEnd[boxPosition + this->mapLenX]))
+    if(this->gameMap[boxPosition - this->mapLenX] == WALL || this->gameMap[boxPosition + this->mapLenX] == WALL)
       yFrozen = true;
-    if(boxPosition - this->mapLenX >= 0 && state.boxPositions.find(boxPosition - this->mapLenX) != state.boxPositions.end()){
+    else if(this->isDeadEnd[boxPosition - this->mapLenX] && this->isDeadEnd[boxPosition + this->mapLenX])
+      yFrozen = true;
+    if(state.boxPositions.find(boxPosition - this->mapLenX) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
       yFrozen = treatWall[boxPosition - this->mapLenX] || isFrozen(state, boxPosition - this->mapLenX, false, true);
     }
-    else if(boxPosition + this->mapLenX < this->mapLenX * this->mapLenY && state.boxPositions.find(boxPosition + this->mapLenX) != state.boxPositions.end()){
+    else if(state.boxPositions.find(boxPosition + this->mapLenX) != state.boxPositions.end()){
       treatWall[boxPosition] = true;
       yFrozen = treatWall[boxPosition + this->mapLenX] || isFrozen(state, boxPosition + this->mapLenX, false, true);
     }
   }
 
-  return xFrozen && yFrozen && !this->isGoal[boxPosition];
+  return xFrozen && yFrozen;
 }
 
 bool Sokoban::movedBox(SOKOBAN_STATE &state, ACTION action){
@@ -1534,11 +891,11 @@ ACTION Sokoban::opposite(ACTION action){
 }
 
 int Sokoban::getTileDistance(POSITION a, POSITION b){
-  return this->tileDistances[a * this->mapLenX * this->mapLenY + b];
+  return this->tileDistances[a * this->mapLenTotal + b];
 }
 
 int Sokoban::getBoxTileDistance(POSITION box, POSITION goal){
-  return this->boxTileDistances[box * this->mapLenX * this->mapLenY + goal];
+  return this->boxTileDistances[box * this->mapLenTotal + goal];
 }
 
 bool Sokoban::checkMoveCloser(SOKOBAN_STATE &state, ACTION action){
@@ -1580,7 +937,7 @@ bool Sokoban::checkMoveCloser(SOKOBAN_STATE &state, ACTION action){
       if(distBoxesNPP[neighboor] < distBoxesPP[neighboor])
         return true;
     }
-    if(bp + this->mapLenX < this->mapLenX * this->mapLenY){
+    if(bp + this->mapLenX < this->mapLenTotal){
       neighboor = bp + this->mapLenX;
       if(distBoxesNPP[neighboor] < distBoxesPP[neighboor])
         return true;
@@ -1591,7 +948,7 @@ bool Sokoban::checkMoveCloser(SOKOBAN_STATE &state, ACTION action){
 }
 
 void Sokoban::calcTileDistanceBoxes(SOKOBAN_STATE &state, POSITION p1, int *distances){
-  const int tiles = this->mapLenX * this->mapLenY;
+  const int tiles = this->mapLenTotal;
   std::queue<std::pair<POSITION, int>> q;
   std::unordered_set<POSITION> closed;
   std::pair<POSITION, int> auxP;
@@ -1646,7 +1003,7 @@ void Sokoban::calcTileDistanceBoxes(SOKOBAN_STATE &state, POSITION p1, int *dist
 }
 
 void Sokoban::calculateTileDistances(){
-  const int tiles = this->mapLenX * this->mapLenY;
+  const int tiles = this->mapLenTotal;
 
   int *tempTileDistances = new int[tiles];
   std::queue<std::pair<POSITION, int>> q;
@@ -1715,99 +1072,129 @@ void Sokoban::calculateTileDistances(){
 }
 
 void Sokoban::calculateBoxTileDistances(){
-  const int tiles = this->mapLenX * this->mapLenY;
+  const int tiles = this->mapLenTotal;
 
-  std::vector<SOKOBAN_NODE*> nodes;
+  int *tempTileDistances = new int[tiles];
+  std::queue<std::pair<POSITION, int>> q;
+  std::unordered_set<POSITION> closed;
+  std::pair<POSITION, int> auxP;
 
-  int playerStartPosition;
-  int distance;
+  for(POSITION i = 0; i < tiles; i++){
+    for(int j = 0; j < tiles; j++)
+      tempTileDistances[j] = SHRT_MAX;
 
-  for(int i = 0; i < tiles * tiles; i++)
-    this->boxTileDistances[i] = SHRT_MAX;
+    while(!q.empty()) q.pop();
+    closed.clear();
 
-  for(POSITION p = 0; p < tiles; p++){
-    if(this->gameMap[p] == WALL || this->isDeadEnd[p])
-      continue;
+    if(this->gameMap[i] != WALL){
+      auxP.first = i;
+      auxP.second = 0;
+      q.push(auxP);
+    }
 
-    for(POSITION p2 = 0; p2 < tiles; p2++){
-      if(this->gameMap[p2] == WALL)
-        continue;
+    while(!q.empty()){
+      std::pair<POSITION, int> p = q.front();
+      q.pop();
 
-      for(int playerStart = 0; playerStart < 4; playerStart++){
-        switch (playerStart) {
-          case 0:
-            playerStartPosition = p - this->mapLenX;
-            if(playerStartPosition < 0 || this->gameMap[playerStartPosition] == WALL)
-              continue;
-            break;
-          case 1:
-            playerStartPosition = p + this->mapLenX;
-            if(playerStartPosition > tiles || this->gameMap[playerStartPosition] == WALL)
-              continue;
-            break;
-          case 2:
-            playerStartPosition = p - 1;
-            if(p % this->mapLenX == 0 || this->gameMap[playerStartPosition] == WALL)
-              continue;
-            break;
-          case 3:
-            playerStartPosition = p + 1;
-            if((p+1) % this->mapLenX == 0 || this->gameMap[playerStartPosition] == WALL)
-              continue;
-            break;
+      if(closed.find(p.first) == closed.end()){
+        closed.insert(p.first);
+        tempTileDistances[p.first] = p.second;
+
+        POSITION neighboor = p.first;
+        auxP.second = p.second + 1;
+
+        neighboor = neighboor - this->mapLenX;
+        if(neighboor >= 0 && gameMap[neighboor] != WALL && gameMap[neighboor + 2 * this->mapLenX] != WALL){
+          auxP.first = neighboor;
+          q.push(auxP);
         }
+        neighboor = neighboor + 2 * this->mapLenX;
+        if(neighboor < this->mapLenX*this->mapLenY && gameMap[neighboor] != WALL && gameMap[neighboor - 2 * this->mapLenX] != WALL){
+          auxP.first = neighboor;
+          q.push(auxP);
+        }
+        neighboor = neighboor - this->mapLenX;
 
-        std::priority_queue<SOKOBAN_NODE*, std::vector<SOKOBAN_NODE*>, ComparePriorityAstar> open;
-        std::unordered_set<SOKOBAN_STATE> closed;
-        nodes.clear();
-        distance = SHRT_MAX;
-
-        SOKOBAN_STATE initialState;
-        initialState.playerPosition = playerStartPosition;
-        initialState.boxPositions.insert(p);
-
-        SOKOBAN_NODE* root = makeNodePreSearch(NULL, UP, initialState, p2, 0);
-        nodes.push_back(root);
-        open.push(root);
-
-        while(!open.empty() && distance == SHRT_MAX){
-          SOKOBAN_NODE* n = open.top();
-          open.pop();
-
-          if(closed.find(*(n->state)) == closed.end()){
-            closed.insert(*(n->state));
-
-            if(n->state->boxPositions.find(p2) != n->state->boxPositions.end())
-              distance = n->pathCost;
-            else{
-              for(std::pair<ACTION, SOKOBAN_STATE> s : getSucc(*(n->state))){
-                if(closed.find(s.second) == closed.end()){
-                  SOKOBAN_NODE* nl = makeNodePreSearch(n, s.first, s.second, p2, n->pathCost + 1);
-                  if(nl->heuristica < SHRT_MAX){
-                    nodes.push_back(nl);
-                    open.push(nl);
-                  }
-                  else{
-                    delete nl->state;
-                    delete nl;
-                  }
-                }
-              }
-
-              delete n->state;
-              n->state = nullptr;
-            }
+        if(neighboor % this->mapLenX != 0){
+          neighboor--;
+          if(gameMap[neighboor] != WALL && gameMap[neighboor + 2] != WALL){
+            auxP.first = neighboor;
+            q.push(auxP);
+          }
+          neighboor++;
+        }
+        if((neighboor+1) % this->mapLenX != 0){
+          neighboor++;
+          if(gameMap[neighboor] != WALL && gameMap[neighboor - 2] != WALL){
+            auxP.first = neighboor;
+            q.push(auxP);
           }
         }
+      }
+    }
 
-        for(SOKOBAN_NODE* np : nodes){
-          if(np->state != nullptr)
-            delete np->state;
-          delete np;
+    for(int j = 0; j < tiles; j++)
+      this->boxTileDistances[i * tiles + j] = tempTileDistances[j];
+
+  }
+  delete[] tempTileDistances;
+}
+
+void Sokoban::calculateTunnelMacros(){
+  const int tiles = this->mapLenTotal;
+  POSITION wall1, wall2, boxP1, boxP2, aux;
+  tunnelMacros.clear();
+  for(POSITION i = 0; i < (POSITION) tiles; i++){
+    if(gameMap[i] == WALL || i % this->mapLenX == 0 || (i+1) % this->mapLenX == 0 || i < this->mapLenX || i + this->mapLenX >= this->mapLenTotal)
+      continue;
+
+    wall1 = i - this->mapLenX;
+    wall2 = i + this->mapLenX;
+    if(wall1 >= 0 && wall2 < this->mapLenTotal && gameMap[wall1] == WALL && gameMap[wall2] == WALL){
+      boxP1 = i - 1;
+      boxP2 = i + 1;
+      if(boxP1 > 0 && gameMap[boxP1] != WALL && !this->isGoal[boxP1]){
+        wall1 = boxP1 - this->mapLenX;
+        wall2 = boxP1 + this->mapLenX;
+        if((wall1 >= 0 && gameMap[wall1] == WALL) || (wall2 < this->mapLenTotal && gameMap[wall2] == WALL)){
+          aux = boxP1 - 1;
+          if(aux >= 0 && gameMap[aux] != WALL)
+            tunnelMacros.emplace(TUNNEL_MACRO{i, boxP1}, LEFT);
         }
+      }
+      if(boxP2 < this->mapLenTotal && gameMap[boxP2] != WALL && !this->isGoal[boxP2]){
+        wall1 = boxP2 - this->mapLenX;
+        wall2 = boxP2 + this->mapLenX;
+        if((wall1 >= 0 && gameMap[wall1] == WALL) || (wall2 < this->mapLenTotal && gameMap[wall2] == WALL)){
+          aux = boxP2 + 1;
+          if(aux < this->mapLenTotal && gameMap[aux] != WALL)
+            tunnelMacros.emplace(TUNNEL_MACRO{i, boxP2}, RIGHT);
+        }
+      }
+    }
 
-        if(distance < this->boxTileDistances[p * tiles + p2])
-          this->boxTileDistances[p * tiles + p2] = distance;
+    wall1 = i - 1;
+    wall2 = i + 1;
+    if(wall1 >= 0 && wall2 < this->mapLenTotal && gameMap[wall1] == WALL && gameMap[wall2] == WALL){
+      boxP1 = i - this->mapLenX;
+      boxP2 = i + this->mapLenX;
+      if(boxP1 > 0 && gameMap[boxP1] != WALL && !this->isGoal[boxP1]){
+        wall1 = boxP1 - 1;
+        wall2 = boxP1 + 1;
+        if((wall1 >= 0 && gameMap[wall1] == WALL) || (wall2 < this->mapLenTotal && gameMap[wall2] == WALL)){
+          aux = boxP1 - this->mapLenX;
+          if(aux >= 0 && gameMap[aux] != WALL)
+            tunnelMacros.emplace(TUNNEL_MACRO{i, boxP1}, UP);
+        }
+      }
+      if(boxP2 < this->mapLenTotal && gameMap[boxP2] != WALL && !this->isGoal[boxP2]){
+        wall1 = boxP2 - 1;
+        wall2 = boxP2 + 1;
+        if((wall1 >= 0 && gameMap[wall1] == WALL) || (wall2 < this->mapLenTotal && gameMap[wall2] == WALL)){
+          aux = boxP2 + this->mapLenX;
+          if(aux < this->mapLenTotal && gameMap[aux] != WALL)
+            tunnelMacros.emplace(TUNNEL_MACRO{i, boxP2}, DOWN);
+        }
       }
     }
   }

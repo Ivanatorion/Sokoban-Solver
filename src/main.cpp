@@ -3,6 +3,57 @@
 #include "../include/Sokoban.h"
 #include "../include/GameSokoban.h"
 
+#include <thread>
+#include <mutex>
+
+#define TH_BUFFER_SIZE 10
+std::mutex bufferMutex;
+
+bool th_quitThread = false;
+int th_bufferStart = 0, th_bufferEnd = 0;
+int th_curBufferSize = 0;
+
+std::vector<ACTION> th_solBuffer[TH_BUFFER_SIZE];
+int th_levelNs[TH_BUFFER_SIZE];
+
+void sendInputsThread(GameSokoban* gsb, bool saveOnly){
+  while(!th_quitThread || th_curBufferSize > 0){
+    while(th_curBufferSize == 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    if(saveOnly){
+      FILE *fp = fopen("SaveSolution.txt", "a");
+      fprintf(fp, "%d\n", th_levelNs[th_bufferStart]);
+      for(int i = 0; i < (int) th_solBuffer[th_bufferStart].size(); i++){
+        switch(th_solBuffer[th_bufferStart][i]){
+          case UP:
+            fprintf(fp, "U");
+            break;
+          case DOWN:
+            fprintf(fp, "D");
+            break;
+          case LEFT:
+            fprintf(fp, "L");
+            break;
+          case RIGHT:
+            fprintf(fp, "R");
+            break;
+        }
+      }
+      fprintf(fp, "\n");
+      fclose(fp);
+    }
+    else{
+      gsb->sendSolution(th_levelNs[th_bufferStart], th_solBuffer[th_bufferStart]);
+    }
+
+    bufferMutex.lock();
+    th_bufferStart = (th_bufferStart + 1) % TH_BUFFER_SIZE;
+    th_curBufferSize--;
+    bufferMutex.unlock();
+  }
+}
+
 int intFromString(char *str){
   int result = 0;
   while(*str != '\0'){
@@ -12,46 +63,50 @@ int intFromString(char *str){
   return result;
 }
 
-void parseArgs(int argc, char* argv[], bool *showHelp, bool *verbose, ALGO *algo, bool *lowMemory, int *ramLimit, bool *greedyOOM, bool *nonIT, char levelFile[]){
-  int i = 0;
+void parseArgs(int argc, char* argv[], bool *showHelp, bool *verbose, bool *lowMemory, int *ramLimit, bool *nonIT, bool *nonITSave, char levelFile[],
+               int *nonITStart, int *nonITEnd)
+{
+  int i = 1;
 
   while(i < argc){
     if(!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help"))
       *showHelp = true;
-    if(!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose"))
+    else if(!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose"))
       *verbose = true;
-    if(!strcmp(argv[i], "-lm") || !strcmp(argv[i], "--lowMemory"))
+    else if(!strcmp(argv[i], "-lm") || !strcmp(argv[i], "--lowMemory"))
       *lowMemory = true;
-    if(!strcmp(argv[i], "--greedyOOM"))
-      *greedyOOM = true;
-    if(!strcmp(argv[i], "--nonIT"))
+    else if(!strcmp(argv[i], "--nonIT"))
       *nonIT = true;
-    if(!strcmp(argv[i], "-f") || !strcmp(argv[i], "--file")){
+     else if(!strcmp(argv[i], "--nonITSave"))
+      *nonITSave = true;
+    else if(!strcmp(argv[i], "--nonITStart")){
+      i++;
+      if(i < argc){
+        *nonITStart = intFromString(argv[i]);
+      }
+    }
+    else if(!strcmp(argv[i], "--nonITLast")){
+      i++;
+      if(i < argc){
+        *nonITEnd = intFromString(argv[i]);
+      }
+    }
+    else if(!strcmp(argv[i], "-f") || !strcmp(argv[i], "--file")){
       i++;
       if(i < argc){
         strcpy(levelFile, argv[i]);
       }
     }
-    if(!strcmp(argv[i], "-a") || !strcmp(argv[i], "--algorithm")){
-      i++;
-      if(i < argc){
-        if(!strcmp(argv[i], "astar"))
-          *algo = ASTAR;
-        if(!strcmp(argv[i], "idastar"))
-          *algo = IDASTAR;
-        if(!strcmp(argv[i], "greedy"))
-          *algo = GREEDY;
-        if(!strcmp(argv[i], "peastar"))
-          *algo = PEASTAR;
-      }
-    }
-    if(!strcmp(argv[i], "-rl") || !strcmp(argv[i], "--ramLimit")){
+    else if(!strcmp(argv[i], "-rl") || !strcmp(argv[i], "--ramLimit")){
       i++;
       if(i < argc){
         *ramLimit = intFromString(argv[i]);
         if(*ramLimit > 98 || *ramLimit < 1)
           *ramLimit = 95;
       }
+    }
+    else{
+      printf("Warning: Unrecognized argument \"%s\"\n", argv[i]);
     }
     i++;
   }
@@ -63,18 +118,18 @@ void showHelpMessage(){
   printf("(-h  | --help)            : Display help message\n");
   printf("(-v  | --verbose)         : Prints search status during execution\n");
   printf("(-lm | --lowMemory)       : Use less memory during search (at expense of search speed)\n");
-  printf("(-a  | --algorithm) [Alg] : Specfies the algorithm to use in the search\n");
   printf("(-rl | --ramLimit) [N]    : Percentage of system RAM limt (1 - 98)\n");
-  printf("(--greedyOOM)             : Retry with GBFS if out of memory\n");
   printf("(--nonIT)                 : Non interactive mode (game-sokoban.com)\n");
+  printf("(--nonITSave)             : Non interactive mode (Save to file)\n");
+  printf("(--nonITStart [N])        : First level of Non interactive mode\n");
+  printf("(--nonITLast [N])         : Last level of Non interactive mode\n");
   printf("(-f | --file) [File]      : Level file path\n");
-  printf("\nAlg: astar | idastar | greedy | peastar\n");
 }
 
-SOKOBAN_SOLUTION trySolve(bool verbose, bool lowMemory, ALGO algo, int ramLimit, Sokoban *sokoban){
-  SOKOBAN_SOLUTION sl = sokoban->solve(verbose, lowMemory, algo, 0, ramLimit);
+SOKOBAN_SOLUTION trySolve(bool verbose, bool lowMemory, int ramLimit, Sokoban *sokoban){
+  SOKOBAN_SOLUTION sl = sokoban->solve(verbose, lowMemory, ramLimit);
 
-  printf("\nInitial Heuristic: %d\n", sl.heuristicaInicial);
+  printf("\nInitial Heuristic: %d\n", sl.initialHeuristic);
 
   if(sl.cost >= 0){
     printf("Cost: %d\n", sl.cost);
@@ -111,18 +166,26 @@ SOKOBAN_SOLUTION trySolve(bool verbose, bool lowMemory, ALGO algo, int ramLimit,
   return sl;
 }
 
-void nonITAuto(const bool verbose, const bool lowMemory, const ALGO algo, const int ramLimit, const bool greedyOOM){
-  int curLev = 35594;
+void nonITAuto(const bool verbose, const bool lowMemory, const bool nonITSave, const int ramLimit, int curLev, const int lastLevel){
   int rb = 0;
+  FILE *fp;
 
-  FILE *fp = fopen("GameSokobanData/data.txt", "r");
-  if(fp){
-    rb += fscanf(fp, "%d\n", &curLev);
-    fclose(fp);
+  if(curLev == -1){
+    fp = fopen("GameSokobanData/data.txt", "r");
+    if(fp){
+      rb += fscanf(fp, "%d\n", &curLev);
+      fclose(fp);
+    }
+    else{
+      fprintf(stderr, "Could not open file: GameSokobanData/data.txt\n");
+      exit(1);
+    }
   }
 
   GameSokoban gsb = GameSokoban();
-  while(gsb.getLevel(curLev, "GameSokobanData/lev.txt")){
+  std::thread sendThread(sendInputsThread, &gsb, nonITSave);
+
+  while(curLev <= lastLevel && gsb.getLevel(curLev, "GameSokobanData/lev.txt")){
     printf("AUTO: Solving level %d...\n", curLev);
     FILE *fps = fopen("GameSokobanData/lev.txt", "r");
     Sokoban sokoban(fps);
@@ -130,81 +193,44 @@ void nonITAuto(const bool verbose, const bool lowMemory, const ALGO algo, const 
 
     SOKOBAN_SOLUTION solution;
 
-    solution = trySolve(verbose, lowMemory, algo, ramLimit, &sokoban);
+    solution = trySolve(verbose, lowMemory, ramLimit, &sokoban);
 
-    if(solution.cost == NO_RAM && greedyOOM && algo != GREEDY){
-      printf("\nRetrying with GBFS...\n");
-      solution = trySolve(verbose, lowMemory, GREEDY, ramLimit, &sokoban);
+    if(solution.cost > 0){
+      while(th_curBufferSize == TH_BUFFER_SIZE)
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+      bufferMutex.lock();
+      th_levelNs[th_bufferEnd] = curLev;
+      th_solBuffer[th_bufferEnd] = solution.path;
+      th_bufferEnd = (th_bufferEnd + 1) % TH_BUFFER_SIZE;
+      th_curBufferSize++;
+      bufferMutex.unlock();
     }
 
-    //gsb.sendSolution(curLev, solution.path);
-
-    char buffer[1024];
-    sprintf(buffer, "GameSokobanData/Solutions.txt");
-    fps = fopen(buffer, "a");
-    fprintf(fps, "Level: %d\n", curLev);
-    if(solution.cost == NO_RAM){
-      fprintf(fps, "Result: No RAM\n");
-    }
-    else if(solution.cost == NO_SOLUTION){
-      fprintf(fps, "Result: No solution\n");
-    }
-    else{
-      fprintf(fps, "Result: Solved (");
-      switch(algo){
-        case PEASTAR:
-          fprintf(fps, "PEA*");
-          break;
-        case ASTAR:
-          fprintf(fps, "A*");
-          break;
-        case GREEDY:
-          fprintf(fps, "GBFS");
-          break;
-        case IDASTAR:
-          fprintf(fps, "IDA*");
-          break;
-      }
-      fprintf(fps, ")\nExpanded states: %lld\nTime(ms): %lld\nCost: %d\n", solution.expanded, solution.timeMilis, solution.cost);
-      for(int i = 0; i < (int) solution.path.size(); i++){
-        switch(solution.path[i]){
-          case UP:
-            fprintf(fps, "U");
-            break;
-          case DOWN:
-            fprintf(fps, "D");
-            break;
-          case LEFT:
-            fprintf(fps, "L");
-            break;
-          case RIGHT:
-            fprintf(fps, "R");
-            break;
-        }
-      }
-      fprintf(fps, "\n\n");
-    }
-    fclose(fps);
     curLev++;
-    fp = fopen("GameSokobanData/data.txt", "w");
-    fprintf(fp, "%d\n", curLev);
-    fclose(fp);
   }
 
-  printf("AUTO: Could not get level: %d\n", curLev);
+  if(curLev > lastLevel){
+    th_quitThread = true;
+    sendThread.join();
+  }
+  else{
+    printf("AUTO: Could not get level: %d\n", curLev);
+  }
 }
 
 int main(int argc, char* argv[]){
   bool verbose = false;
   bool showHelp = false;
-  bool greedyOOM = false;
   bool lowMemory = false;
   bool nonIT = false;
   char levelFile[512] = "NONE_LEVEL";
   int ramLimit = 95;
+  bool nonITSave = false;
 
-  ALGO algo = ASTAR;
-  parseArgs(argc, argv, &showHelp, &verbose, &algo, &lowMemory, &ramLimit, &greedyOOM, &nonIT, levelFile);
+  int nonITStart = -1, nonITLast = 9999999;
+
+  parseArgs(argc, argv, &showHelp, &verbose, &lowMemory, &ramLimit, &nonIT, &nonITSave, levelFile, &nonITStart, &nonITLast);
 
   if(showHelp){
     showHelpMessage();
@@ -217,7 +243,7 @@ int main(int argc, char* argv[]){
   }
 
   if(nonIT){
-    nonITAuto(verbose, lowMemory, algo, ramLimit, greedyOOM);
+    nonITAuto(verbose, lowMemory, nonITSave, ramLimit, nonITStart, nonITLast);
   }
   else{
     FILE *fps = fopen(levelFile, "r");
@@ -230,12 +256,7 @@ int main(int argc, char* argv[]){
 
     SOKOBAN_SOLUTION solution;
 
-    solution = trySolve(verbose, lowMemory, algo, ramLimit, &sokoban);
-
-    if(solution.cost == NO_RAM && greedyOOM && algo != GREEDY){
-      printf("\nRetrying with GBFS...\n");
-      solution = trySolve(verbose, lowMemory, GREEDY, ramLimit, &sokoban);
-    }
+    solution = trySolve(verbose, lowMemory, ramLimit, &sokoban);
   }
 
   return 0;

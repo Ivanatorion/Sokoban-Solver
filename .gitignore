@@ -1,5 +1,5 @@
 .vscode/
-bin/
+bin/*.o
 sokoban
 sokoban.exe
 samples/Lev.txt
@@ -9,3 +9,5 @@ GameSokobanData/Levels/
 GameSokobanData/Solutions/
 GameSokobanData/lev.txt
 lev.txt
+levBig.txt
+SaveSolution.txt
